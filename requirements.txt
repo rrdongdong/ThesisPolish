@@ -1,0 +1,17 @@
+# ThesisPolish Python dependencies
+#
+# Install: python -m pip install -r requirements.txt
+#
+# NOTE: keep this file ASCII-only. pip reads requirement files with the system
+# locale encoding on Windows (cp936/GBK on Chinese Windows), so non-ASCII
+# comments make `pip install -r requirements.txt` fail with UnicodeDecodeError.
+#
+# The pi agent runtime itself does NOT need these packages; they are only used
+# by the Python-side tools and by the legacy scripts.
+
+# tools/pdf_ingest.py: calls the Moonshot Files API (upload PDF / download text).
+requests>=2.31
+
+# Legacy pipeline (generate_outline.py / polish.py) uses the OpenAI SDK against
+# Moonshot's OpenAI-compatible endpoint. Not needed by the pi agent path.
+openai>=1.0

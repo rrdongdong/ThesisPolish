@@ -1,0 +1,10 @@
+{
+  "packages": [],
+  "enableInstallTelemetry": false,
+  "enableAnalytics": false,
+  "retry": {
+    "enabled": true,
+    "maxRetries": 4,
+    "baseDelayMs": 5000
+  }
+}

@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# 运行产物/备份
+*.bak
+.thesis/
+_run/
+
+# pi 运行时可能写入的本地状态（配置与扩展是受版本控制的，见 .pi/agent/）
+.pi/agent/auth.json
+.pi/agent/models-store.json
+.pi/agent/sessions/
+.pi/agent/git/
+# pi 的 grep/find 依赖（rg/fd，本地自动准备，不入库）
+.pi/agent/bin/
+
+# 临时/研究文件
+_research/
+_scratch-lead/
+*.log
+mock_requests*.jsonl
+
+# 用户论文 PDF / 个人稿件，避免误提交
+*.pdf
+
+# 编辑器
+.vscode/
+.idea/
