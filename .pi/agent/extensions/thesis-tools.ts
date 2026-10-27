@@ -9,7 +9,7 @@
  * 工具（名称是 Python 运行时 / GUI 的 API 契约，禁止随意改名）：
  *   thesis_pdf_ingest       调 tools/pdf_ingest.py：上传 PDF → 导出 .thesis/pdf_text.txt，
  *                           返回 JSON 摘要；失败抛错（pi 会标记 isError=true）。
- *   thesis_outline_validate 确定性校验九行大纲模板（题目/摘要/第一章..第五章题目/总结/参考文献）。
+ *   thesis_outline_validate 确定性校验大纲（九字段 + 章节下缩进小标题）。
  *   thesis_outline_save     校验 + 备份 outline.txt → outline.txt.bak + UTF-8 原子写入。
  *   thesis_save_polished    备份并写入 polished.txt，追加 .thesis/polish_history.jsonl。
  *
@@ -31,7 +31,8 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 // ---------------------------------------------------------------------------
-// 九行大纲模板（与 generate_outline.py / README 的模板一致；注意是 9 行不是 7 行）
+// 大纲模板：九行字段（题目/摘要/第一~五章题目/总结/参考文献）+ 每章下一级缩进小标题
+// 小标题格式：在“第X章题目：…”的下一行起，用两个空格缩进，如 “  1.1 研究背景”
 // ---------------------------------------------------------------------------
 const OUTLINE_LABELS = [
   "题目",
@@ -45,6 +46,16 @@ const OUTLINE_LABELS = [
   "参考文献",
 ] as const;
 type OutlineLabel = (typeof OUTLINE_LABELS)[number];
+const CHAPTER_LABELS: readonly OutlineLabel[] = [
+  "第一章题目",
+  "第二章题目",
+  "第三章题目",
+  "第四章题目",
+  "第五章题目",
+];
+/** 小标题建议以 “1.1 / 2.3.1 / （一） / 1、” 之类的编号开头。 */
+const SUBHEADING_NUMBER_RE = /^(\d+(?:\.\d+)*[.、．:：]?|[一二三四五六七八九十]+[、.．:：]|\([0-9一二三四五六七八九十]+\))/;
+const MAX_SUBHEADINGS_PER_CHAPTER = 20;
 
 interface OutlineReport {
   valid: boolean;
@@ -53,6 +64,9 @@ interface OutlineReport {
   fields: Partial<Record<OutlineLabel, string>>;
   missing: string[];
   lineCount: number;
+  fieldCount: number;
+  sections: Partial<Record<OutlineLabel, string[]>>;
+  subheadingCount: number;
 }
 
 const short = (text: string, max = 52): string =>
@@ -63,29 +77,55 @@ function validateOutline(raw: string): OutlineReport {
   const warnings: string[] = [];
   const fields: Partial<Record<OutlineLabel, string>> = {};
   const seen: OutlineLabel[] = [];
+  const sections: Partial<Record<OutlineLabel, string[]>> = {};
   const labelRe = new RegExp(`^(${OUTLINE_LABELS.join("|")})[：:](.*)$`);
+  let subheadingCount = 0;
+  let currentChapter: OutlineLabel | null = null;
   const lines = raw
     .replace(/^\uFEFF/, "")
     .replace(/\r\n?/g, "\n")
     .split("\n")
-    .map((text, index) => ({ text: text.trim(), no: index + 1 }))
-    .filter((entry) => entry.text.length > 0);
+    .map((text, index) => ({ text, no: index + 1 }))
+    .filter((entry) => entry.text.trim().length > 0);
 
   for (const { text, no } of lines) {
-    const match = text.match(labelRe);
+    const indent = text.length - text.trimStart().length;
+    const trimmed = text.trim();
+    // 缩进 >=2 的行视为“章节目录下的小标题”，只允许出现在章节字段之后
+    if (indent >= 2) {
+      if (!currentChapter) {
+        errors.push(`第 ${no} 行是缩进小标题，但前面没有“第X章题目”字段: ${short(trimmed)}`);
+        continue;
+      }
+      const list = sections[currentChapter] ?? (sections[currentChapter] = []);
+      if (list.length >= MAX_SUBHEADINGS_PER_CHAPTER) {
+        warnings.push(`第 ${no} 行起小标题过多（>${MAX_SUBHEADINGS_PER_CHAPTER} 条），已忽略: ${short(trimmed)}`);
+        continue;
+      }
+      list.push(trimmed);
+      subheadingCount += 1;
+      if (!SUBHEADING_NUMBER_RE.test(trimmed)) {
+        warnings.push(`第 ${no} 行小标题建议保留原文编号（如 “3.1 研究背景”）: ${short(trimmed)}`);
+      }
+      continue;
+    }
+
+    const match = trimmed.match(labelRe);
     if (!match) {
-      errors.push(`第 ${no} 行不是模板字段（模板外内容一律不允许）: ${short(text)}`);
+      errors.push(`第 ${no} 行不是模板字段（模板外内容一律不允许）: ${short(trimmed)}`);
+      currentChapter = null;
       continue;
     }
     const label = match[1] as OutlineLabel;
     const value = match[2].trim();
-    if (!text.includes("：")) warnings.push(`第 ${no} 行使用了半角冒号，建议改为全角“：”`);
+    if (!trimmed.includes("：")) warnings.push(`第 ${no} 行使用了半角冒号，建议改为全角“：”`);
     if (seen.includes(label)) {
       errors.push(`字段重复: ${label}`);
       continue;
     }
     seen.push(label);
     fields[label] = value;
+    currentChapter = CHAPTER_LABELS.includes(label) ? label : null;
     if (!value) errors.push(`字段为空: ${label}（缺失内容请填“未提供”）`);
     else if (/^<.*>$/.test(value)) warnings.push(`字段 ${label} 疑似仍是模板占位符: ${short(value)}`);
   }
@@ -93,6 +133,9 @@ function validateOutline(raw: string): OutlineReport {
   const ordered = OUTLINE_LABELS.filter((label) => seen.includes(label));
   if (ordered.join() !== seen.join()) errors.push(`字段顺序错误，必须为: ${OUTLINE_LABELS.join(" / ")}`);
   if (seen.length === 0) errors.push("内容为空或没有任何模板字段");
+  if (subheadingCount === 0) {
+    warnings.push("未识别到任何章节小标题（如需层级目录，请在章节目录行下方用两个空格缩进列出下一级小标题）");
+  }
   return {
     valid: errors.length === 0,
     errors,
@@ -100,15 +143,26 @@ function validateOutline(raw: string): OutlineReport {
     fields,
     missing: OUTLINE_LABELS.filter((label) => !(label in fields)),
     lineCount: lines.length,
+    fieldCount: seen.length,
+    sections,
+    subheadingCount,
   };
 }
 
 function formatReport(report: OutlineReport): string {
-  const lines = [`模板校验: ${report.valid ? "通过" : "未通过"}（字段行 ${report.lineCount}/${OUTLINE_LABELS.length}）`];
-  for (const error of report.errors) lines.push(`  ✗ ${error}`);
-  for (const warning of report.warnings) lines.push(`  ! ${warning}`);
-  if (report.valid) lines.push("  ✓ 9 个字段齐全、顺序正确、无空值");
-  return lines.join("\n");
+  const titles = [
+    `模板校验: ${report.valid ? "通过" : "未通过"}（字段 ${report.fieldCount}/${OUTLINE_LABELS.length}，小标题 ${report.subheadingCount} 条）`,
+  ];
+  for (const error of report.errors) titles.push(`  ✗ ${error}`);
+  for (const warning of report.warnings) titles.push(`  ! ${warning}`);
+  if (report.valid) titles.push("  ✓ 9 个字段齐全、顺序正确、无空值");
+  for (const label of CHAPTER_LABELS) {
+    const list = report.sections[label];
+    if (list && list.length > 0) {
+      titles.push(`  · ${label}：${list.length} 条小标题（${list.slice(0, 3).join("；")}${list.length > 3 ? "…" : ""}）`);
+    }
+  }
+  return titles.join("\n");
 }
 
 /** 统一换行 / 去 BOM / 末尾补一个换行。 */
@@ -437,6 +491,9 @@ async function validateOutlineTool(
       missing: report.missing,
       fields: report.fields,
       lineCount: report.lineCount,
+      fieldCount: report.fieldCount,
+      sections: report.sections,
+      subheadingCount: report.subheadingCount,
     },
   };
 }
@@ -453,10 +510,12 @@ async function saveOutline(
   if (!body) throw new Error("大纲内容为空，未写入 outline.txt");
   await withFileMutationQueue(file, () => writeFile(file, body, "utf8"));
 
-  const lines = [`已保存大纲: outline.txt（${body.trim().length} 字符 / ${report.lineCount} 行）`];
+  const lines = [
+    `已保存大纲: outline.txt（${body.trim().length} 字符 / ${report.lineCount} 行，小标题 ${report.subheadingCount} 条）`,
+  ];
   if (backupPath) lines.push("已备份旧文件: outline.txt.bak");
   if (report.valid) {
-    lines.push("模板校验: 通过（9 个字段齐全、顺序正确）");
+    lines.push("模板校验: 通过（9 个字段齐全、顺序正确；章节小标题为可选）");
   } else {
     lines.push(`模板校验: 未通过（${report.errors.length} 个问题），文件仍已保存以便人工修正：`);
     for (const error of report.errors.slice(0, 10)) lines.push(`  ✗ ${error}`);
@@ -474,6 +533,9 @@ async function saveOutline(
       warnings: report.warnings,
       chars: body.trim().length,
       lineCount: report.lineCount,
+      fieldCount: report.fieldCount,
+      sections: report.sections,
+      subheadingCount: report.subheadingCount,
       fields: report.fields,
     },
   };
@@ -559,14 +621,15 @@ export default function thesisToolsExtension(pi: ExtensionAPI): void {
     name: "thesis_outline_validate",
     label: "Thesis Outline Validate",
     description:
-      "确定性校验九行论文大纲模板（题目/摘要/第一章题目/第二章题目/第三章题目/第四章题目/" +
-      "第五章题目/总结/参考文献，缺失内容写“未提供”）。返回可直接阅读的中文报告，" +
-      "details 里是 {valid, issues[], warnings[], missing[], fields, lineCount}。不读写文件。",
-    promptSnippet: "thesis_outline_validate: 校验九行大纲模板结构是否合法",
+      "确定性校验论文大纲：九个固定字段（题目/摘要/第一章~第五章题目/总结/参考文献）必须齐全且顺序固定；" +
+      "每个“第X章题目”行下方允许用两个空格缩进列出该章**下一级小标题**（如 “  1.1 研究背景”）。" +
+      "返回可直接阅读的中文报告，details 里是 {valid, issues[], warnings[], missing[], fields, sections, subheadingCount, lineCount}。不读写文件。",
+    promptSnippet: "thesis_outline_validate: 校验大纲（九字段 + 章节下缩进小标题）结构是否合法",
     parameters: Type.Object({
       content: Type.String({
         description:
-          "待校验的完整大纲文本：恰好 9 行，每行“字段名：内容”，顺序固定，缺失写“未提供”",
+          "待校验的完整大纲文本：9 个“字段名：内容”行顺序固定（缺失写“未提供”）；" +
+          "每章行下方可跟两个空格缩进的下一级小标题（如 “  1.1 研究背景”），不要输出其它内容",
       }),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -578,14 +641,19 @@ export default function thesisToolsExtension(pi: ExtensionAPI): void {
     name: "thesis_outline_save",
     label: "Thesis Outline Save",
     description:
-      "校验并把九行大纲写入项目根目录 outline.txt（UTF-8；已有文件先备份为 outline.txt.bak）。" +
-      "返回保存路径、字数与校验警告；模板不合法时仍会保存以便人工修正，但会在返回值中列出问题。",
-    promptSnippet: "thesis_outline_save: 校验并保存 outline.txt（自动备份 outline.txt.bak）",
+      "校验并把大纲写入项目根目录 outline.txt（UTF-8；已有文件先备份为 outline.txt.bak）。" +
+      "格式：9 个固定字段行，每章行下方可用两个空格缩进列出下一级小标题。" +
+      "返回保存路径、字数、小标题条数与校验警告；模板不合法时仍会保存以便人工修正，但会在返回值中列出问题。",
+    promptSnippet: "thesis_outline_save: 校验并保存 outline.txt（含章节小标题，自动备份 outline.txt.bak）",
     promptGuidelines: [
       "生成或修改大纲后必须调用 thesis_outline_save 落盘；不要用 write/edit 直接写 outline.txt。",
+      "小标题写在对应“第X章题目”行的下一行，两个空格缩进，保留原文编号；没有小标题可省略。",
     ],
     parameters: Type.Object({
-      content: Type.String({ description: "要保存的九行大纲全文" }),
+      content: Type.String({
+        description:
+          "要保存的完整大纲：9 个字段行 + 每章下方可选的两个空格缩进小标题行",
+      }),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       return saveOutline(ctx, params);

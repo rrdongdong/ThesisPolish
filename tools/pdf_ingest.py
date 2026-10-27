@@ -200,6 +200,27 @@ def detect_headings(text: str) -> list[dict[str, Any]]:
     return headings
 
 
+def build_structure(headings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把扁平标题列表整理成“章 -> 下一级小标题”结构，供大纲提取直接使用。
+
+    返回 ``[{"title": "1 Introduction", "children": ["1.1 Motivation", ...]}, ...]``；
+    仅收 level 2 作为 children（用户只需要“当前标题的下一个小标题”），更深层级忽略。
+    """
+    structure: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for heading in headings:
+        level = int(heading.get("level") or 1)
+        title = str(heading.get("title") or "").strip()
+        if not title:
+            continue
+        if level <= 1:
+            current = {"title": title, "children": []}
+            structure.append(current)
+        elif level == 2 and current is not None:
+            current["children"].append(title)
+    return structure
+
+
 def _count_lines(text: str) -> int:
     if not text:
         return 0
@@ -410,6 +431,7 @@ def ingest(pdf: str, out: str = DEFAULT_OUT_DIR, force: bool = False) -> dict[st
         "chars": len(text),
         "lines": _count_lines(text),
         "headings": headings,
+        "structure": build_structure(headings),
         "preview": text[:PREVIEW_CHARS],
         "tail_preview": text[-TAIL_PREVIEW_CHARS:] if text else "",
         "error": None,
@@ -427,6 +449,7 @@ def _failure(error: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         "chars": 0,
         "lines": 0,
         "headings": [],
+        "structure": [],
         "preview": "",
         "tail_preview": "",
         "error": error,

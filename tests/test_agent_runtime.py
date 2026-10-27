@@ -1174,3 +1174,53 @@ def test_retry_success_clears_previous_error():
     done = [event for event in events if event.kind == "done"][-1]
     assert done.data["ok"] is True, done.data
     assert done.data["error"] is None, done.data
+
+
+def test_toolcall_streaming_events_for_live_preview():
+    """toolcall_start/delta/end 事件应带 toolName/toolCallId，供 GUI 实时预览大纲内容。"""
+    runtime = ar.PiRuntime()
+    start = runtime._handle_message_update(
+        {
+            "assistantMessageEvent": {
+                "type": "toolcall_start",
+                "contentIndex": 0,
+                "id": "call_1",
+                "toolName": "thesis_outline_save",
+            }
+        }
+    )
+    assert start and start[0].kind == "toolcall_start"
+    assert start[0].data["toolName"] == "thesis_outline_save"
+    assert start[0].data["toolCallId"] == "call_1"
+
+    delta = runtime._handle_message_update(
+        {
+            "assistantMessageEvent": {
+                "type": "toolcall_delta",
+                "contentIndex": 0,
+                "delta": '{"content":"题目：X',
+            }
+        }
+    )
+    assert delta and delta[0].kind == "toolcall_delta"
+    assert delta[0].text == '{"content":"题目：X'
+    assert delta[0].data["toolName"] == "thesis_outline_save"
+    assert delta[0].data["toolCallId"] == "call_1"
+
+    end = runtime._handle_message_update(
+        {
+            "assistantMessageEvent": {
+                "type": "toolcall_end",
+                "contentIndex": 0,
+                "toolCall": {
+                    "id": "call_1",
+                    "name": "thesis_outline_save",
+                    "arguments": {"content": "题目：X"},
+                },
+            }
+        }
+    )
+    kinds = [event.kind for event in end]
+    assert "status" in kinds and "toolcall_end" in kinds
+    end_event = [event for event in end if event.kind == "toolcall_end"][0]
+    assert end_event.data["arguments"]["content"] == "题目：X"

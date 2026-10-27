@@ -445,3 +445,55 @@ def test_rpc_model_override_is_sent_to_provider(work: Path, mock_server_factory,
         assert done_event.data.get("ok") is True, done_event.data
     finally:
         runtime.stop()
+
+OUTLINE_WITH_SECTIONS = "\n".join(
+    [
+        "题目：REALM: An MLLM-Agent Framework",
+        "摘要：本文提出 REALM。",
+        "第一章题目：Introduction",
+        "  1.1 Motivation",
+        "  1.2 Contributions",
+        "第二章题目：Related Works",
+        "  2.1 3D Segmentation",
+        "第三章题目：Methodology",
+        "  3.1 Feature Field",
+        "第四章题目：Experiments",
+        "第五章题目：Conclusion",
+        "总结：提出并验证 REALM 框架。",
+        "参考文献：有",
+    ]
+)
+
+
+@requires_pi
+def test_outline_with_subheadings_validated_and_saved(work, mock_server_factory, monkeypatch):
+    """扩展工具：带缩进小标题的大纲应校验通过，并原样写入 outline.txt。"""
+    steps = json.dumps(
+        [
+            {"name": "thesis_outline_validate", "arguments": {"content": OUTLINE_WITH_SECTIONS}},
+            {"name": "thesis_outline_save", "arguments": {"content": OUTLINE_WITH_SECTIONS}},
+        ],
+        ensure_ascii=False,
+    )
+    base_url, port, log_path = mock_server_factory({"MOCK_TOOL_STEPS": steps})
+    project = work / "proj"
+    project.mkdir()
+    agent_dir = _copy_agent_project(project)
+    (agent_dir / "models.json").write_text(_models_json(base_url), encoding="utf-8")
+    events = _run_pi_json(project, agent_dir, base_url, "请提取大纲并包含每章下一级小标题")
+
+    results = _tool_results(events)
+    assert "thesis_outline_validate" in results, events
+    validate = results["thesis_outline_validate"]
+    assert validate["isError"] is False, validate["result"]
+    validate_details = validate["result"].get("details") or {}
+    assert validate_details.get("valid") is True, validate_details
+    assert validate_details.get("subheadingCount", 0) >= 2, validate_details
+    assert validate_details.get("sections"), validate_details
+
+    assert "thesis_outline_save" in results, events
+    save = results["thesis_outline_save"]
+    assert save["isError"] is False, save["result"]
+    saved = (project / "outline.txt").read_text(encoding="utf-8")
+    assert "  1.1 Motivation" in saved and "  2.1 3D Segmentation" in saved
+    assert (save["result"].get("details") or {}).get("subheadingCount", 0) >= 2

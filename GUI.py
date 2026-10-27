@@ -18,6 +18,7 @@ import functools
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -48,7 +49,7 @@ except Exception as exc:  # noqa: BLE001 - 缺少依赖/文件时也要让 GUI �
 POLL_INTERVAL_MS = 80
 MAX_EVENTS_PER_POLL = 400
 WINDOW_TITLE = "论文大纲提取与段落润色"
-PI_BADGE = "pi 0.85.1 · Kimi · v2.5(2026-10-27)"
+PI_BADGE = "pi 0.85.1 · Kimi · v2.6(2026-10-27)"
 
 # pi 不可用 / 启动失败时的中文排查指引
 AGENT_GUIDANCE = (
@@ -89,6 +90,14 @@ class ThesisGUI:
         self._cooldown_waiting = False  # 是否正在等待冷却后自动开始
         self._doctor_running = False  # 是否正在运行限流诊断
         self._last_raw_error_logged = ""  # 避免重复打印同一条原始错误
+        # 实时预览：agent 正在生成的工具参数（thesis_outline_save / thesis_save_polished）
+        self._live_tool: dict | None = None
+        self._live_args = ""
+        self._live_last_update = 0.0
+        # 实时文件监听：agent / 传统流程写 outline.txt 时立即载入编辑器
+        self._outline_watch_job: str | None = None
+        self._outline_watch_mtime: float | None = None
+        self._legacy_outline_running = False
         self._banner_wrap = 0
 
         # --- 两个标签页共享的 StringVars（顶部公共区） ---
@@ -259,11 +268,18 @@ class ThesisGUI:
 
         log_frame = ttk.LabelFrame(paned, text="状态日志（只读：阶段 / 工具调用 / 错误）")
         stream_frame = ttk.LabelFrame(paned, text="流式输出（只读：助手回复）")
+        structure_frame = ttk.LabelFrame(
+            paned, text="章节 / 小标题结构（实时：随大纲生成刷新）"
+        )
         paned.add(log_frame, weight=1)
         paned.add(stream_frame, weight=2)
+        paned.add(structure_frame, weight=1)
 
         self.agent_log_text = self._make_text_with_scroll(log_frame, height=8, readonly=True)
         self.agent_stream_text = self._make_text_with_scroll(stream_frame, height=11, readonly=True)
+        self.agent_structure_text = self._make_text_with_scroll(
+            structure_frame, height=8, readonly=True
+        )
         for tag, color in (
             ("error", "#b91c1c"),
             ("ok", "#166534"),
@@ -308,6 +324,7 @@ class ThesisGUI:
             self.btn_agent_send,
             self.btn_agent_new,
         ]
+        self._update_structure_panel("")
 
     def _on_agent_tab_configure(self, event: tk.Event) -> None:
         """跟随标签页宽度调整横幅换行宽度。"""
@@ -510,6 +527,7 @@ class ThesisGUI:
             self._show_error("读取失败", f"无法读取大纲文件: {path}\n{exc}")
             return
         self._set_text_content(self.outline_text, content)
+        self._update_structure_panel(content)
         self.append_status(f"已加载大纲: {path}")
 
     def save_outline_from_editor(self) -> bool:
@@ -541,7 +559,7 @@ class ThesisGUI:
     # ------------------------------------------------------------------
     # 传统流程（兼容）：子进程调用旧脚本，行为与之前保持一致
     # ------------------------------------------------------------------
-    def _run_subprocess(self, cmd: list[str], on_success=None) -> None:
+    def _run_subprocess(self, cmd: list[str], on_success=None, on_finish=None) -> None:
         env = os.environ.copy()
         env["MOONSHOT_API_KEY"] = self.api_key_var.get().strip()
         # 统一 UTF-8：Windows 中文系统默认 GBK，遇 emoji/生僻字会乱码（pi-runtime.md §10）
@@ -573,6 +591,9 @@ class ThesisGUI:
                 self._call_ui(on_success)
         except Exception as exc:  # noqa: BLE001 - 后台线程异常必须回传界面
             self._call_ui(self._show_error, "异常", str(exc))
+        finally:
+            if on_finish:
+                self._call_ui(on_finish)
 
     def run_outline(self) -> None:
         api_key = self.api_key_var.get().strip()
@@ -597,7 +618,17 @@ class ThesisGUI:
             self.append_status("大纲提取完成")
             self.load_outline_to_editor()
 
-        threading.Thread(target=self._run_subprocess, args=(cmd, on_success), daemon=True).start()
+        def on_finish() -> None:
+            self._legacy_outline_running = False
+            self._stop_outline_watch()
+
+        self._legacy_outline_running = True
+        self._start_outline_watch()
+        threading.Thread(
+            target=self._run_subprocess,
+            args=(cmd, on_success, on_finish),
+            daemon=True,
+        ).start()
 
     def run_polish(self) -> None:
         api_key = self.api_key_var.get().strip()
@@ -1165,6 +1196,14 @@ class ThesisGUI:
             if text:
                 self._stream_buffer += str(text)
                 self._append_agent_stream(str(text))
+        elif kind == "toolcall_start":
+            self._start_live_tool(
+                str(data.get("toolName") or text or ""), str(data.get("toolCallId") or "")
+            )
+        elif kind == "toolcall_delta":
+            self._append_live_tool_delta(str(text), str(data.get("toolCallId") or ""))
+        elif kind == "toolcall_end":
+            self._finish_live_tool(str(data.get("toolName") or text or ""))
         elif kind == "tool_start":
             name = self._event_tool_name(data, text)
             args = data.get("args", data.get("arguments"))
@@ -1193,6 +1232,7 @@ class ThesisGUI:
             self.append_agent_log(
                 f"{icon} {name} → {summary}", tag="error" if is_error else "ok"
             )
+            self._finish_live_tool(name)
         elif kind == "status":
             message = self._event_short_text(data, text, ("text", "message", "status", "phase"))
             if message:
@@ -1280,6 +1320,7 @@ class ThesisGUI:
         self._stream_buffer = ""
         self._tool_update_seen = {}
         self._action_started_at = None
+        self._stop_outline_watch()
 
     def _append_final_assistant_text(self, final_text: str) -> None:
         """done 时确保最终回复完整可见（流式内容缺失时补全）。"""
@@ -1448,6 +1489,8 @@ class ThesisGUI:
         self._pending_action = kind
         self._action_started_at = time.time()
         self._last_raw_error_logged = ""
+        self._live_tool = None
+        self._live_args = ""
         self._stream_buffer = ""
         self._last_agent_error = ""
         self._tool_update_seen = {}
@@ -1491,6 +1534,8 @@ class ThesisGUI:
                 tag="error",
             )
         self._set_agent_busy(True)
+        if kind == "outline":
+            self._start_outline_watch()
         self._log_system_prompt_once()
         return api_key
 
@@ -1698,6 +1743,10 @@ class ThesisGUI:
         self._tool_update_seen = {}
         self._set_text_content(self.agent_log_text, "", readonly=True)
         self._set_text_content(self.agent_stream_text, "", readonly=True)
+        self._live_tool = None
+        self._live_args = ""
+        self._stop_outline_watch()
+        self._update_structure_panel("")
         self.append_agent_log("🆕 已新建对话（清空上下文），等待输入。", tag="ok")
 
     def _recover_saved_artifact_after_failure(self, action: str | None, error_text: str) -> None:
@@ -1747,6 +1796,7 @@ class ThesisGUI:
             self.append_agent_log(f"⚠️ 读取大纲文件失败：{exc}", tag="error")
             return
         self._set_text_content(self.outline_text, content)
+        self._update_structure_panel(content)
         self.append_status(f"已载入大纲: {path}")
         self.append_agent_log(f"📥 已自动载入大纲到编辑器：{path}", tag="ok")
 
@@ -1767,6 +1817,223 @@ class ThesisGUI:
         self._set_text_content(self.output_text, content)
         self.append_status(f"已载入润色输出: {path}")
         self.append_agent_log(f"📥 已自动载入润色结果到输出面板：{path}", tag="ok")
+
+    # ------------------------------------------------------------------
+    # 实时预览：tool 参数流 → 大纲编辑器 / 小标题面板
+    # ------------------------------------------------------------------
+    LIVE_TOOLS = ("thesis_outline_save", "thesis_save_polished")
+
+    @staticmethod
+    def _extract_partial_json_string(raw: str, key: str) -> str:
+        """从（可能不完整的）JSON 文本里容错提取某字符串字段的当前内容。
+
+        用于实时预览：模型流式输出工具参数时，``content``/``text`` 字段可能尚未闭合。
+        """
+        marker = f'"{key}"'
+        idx = raw.find(marker)
+        if idx < 0:
+            return ""
+        colon = raw.find(":", idx + len(marker))
+        if colon < 0:
+            return ""
+        i = colon + 1
+        while i < len(raw) and raw[i] in " \t\r\n":
+            i += 1
+        if i >= len(raw) or raw[i] != '"':
+            return ""
+        i += 1
+        out: list[str] = []
+        escapes = {
+            "n": "\n",
+            "t": "\t",
+            "r": "\r",
+            '"': '"',
+            "\\": "\\",
+            "/": "/",
+            "b": "\b",
+            "f": "\f",
+        }
+        while i < len(raw):
+            ch = raw[i]
+            if ch == "\\":
+                if i + 1 >= len(raw):
+                    break
+                esc = raw[i + 1]
+                if esc == "u":
+                    hex_part = raw[i + 2 : i + 6]
+                    if len(hex_part) < 4:
+                        break
+                    try:
+                        out.append(chr(int(hex_part, 16)))
+                    except ValueError:
+                        break
+                    i += 6
+                    continue
+                out.append(escapes.get(esc, esc))
+                i += 2
+                continue
+            if ch == '"':
+                break
+            out.append(ch)
+            i += 1
+        return "".join(out)
+
+    def _start_live_tool(self, name: str, tool_call_id: str) -> None:
+        if name not in self.LIVE_TOOLS:
+            self._live_tool = None
+            self._live_args = ""
+            return
+        self._live_tool = {"id": str(tool_call_id or ""), "name": name}
+        self._live_args = ""
+        self._live_last_update = 0.0
+        self.append_agent_log(
+            f"✍️ {name} 参数生成中：大纲/润色内容将实时显示…", tag="muted"
+        )
+
+    def _append_live_tool_delta(self, delta: str, tool_call_id: str = "") -> None:
+        live = self._live_tool
+        if not live or not delta:
+            return
+        if tool_call_id and live.get("id") and tool_call_id != live.get("id"):
+            return
+        self._live_args += delta
+        now = time.monotonic()
+        if now - self._live_last_update >= 0.12:
+            self._live_last_update = now
+            self._apply_live_tool_args()
+
+    def _apply_live_tool_args(self) -> None:
+        live = self._live_tool
+        if not live:
+            return
+        key = "content" if live["name"] == "thesis_outline_save" else "text"
+        partial = self._extract_partial_json_string(self._live_args, key)
+        if not partial:
+            return
+        try:
+            if key == "content":
+                self._set_text_content(self.outline_text, partial)
+                self._update_structure_panel(partial)
+            else:
+                self._set_text_content(self.output_text, partial)
+        except tk.TclError:
+            return
+
+    def _finish_live_tool(self, name: str = "") -> None:
+        if self._live_tool and (not name or name == self._live_tool.get("name")):
+            self._apply_live_tool_args()
+        self._live_tool = None
+        self._live_args = ""
+
+    @staticmethod
+    def _parse_outline_structure(text: str) -> list[tuple[str, list[str]]]:
+        """解析大纲文本为 [(章标题, [小标题...]), ...]（小标题为章节行下 2 空格缩进行）。"""
+        chapter_re = re.compile(r"^(第[一二三四五六七八九十百零两0-9]+章)题目[：:](.*)$")
+        chapters: list[tuple[str, list[str]]] = []
+        current: list[str] | None = None
+        for raw_line in (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+            if not raw_line.strip():
+                continue
+            indent = len(raw_line) - len(raw_line.lstrip(" "))
+            stripped = raw_line.strip()
+            if indent < 2:
+                match = chapter_re.match(stripped)
+                if match:
+                    title = f"{match.group(1)} {match.group(2).strip()}".strip()
+                    current = []
+                    chapters.append((title, current))
+                    continue
+                if re.match(r"^(题目|摘要|总结|参考文献)[：:]", stripped):
+                    current = None
+                # 其它未知行忽略、不打断当前章节的小标题关联（容忍流式不完整内容）
+                continue
+            if current is not None:
+                current.append(stripped)
+        return chapters
+
+    def _update_structure_panel(self, outline_text: str | None = None) -> None:
+        widget = getattr(self, "agent_structure_text", None)
+        if widget is None:
+            return
+        if outline_text is None:
+            try:
+                outline_text = self._get_text_content(self.outline_text)
+            except tk.TclError:
+                outline_text = ""
+        chapters = self._parse_outline_structure(outline_text)
+        lines: list[str] = []
+        for title, children in chapters:
+            lines.append(title)
+            for child in children:
+                lines.append(f"    └ {child}")
+        if not lines:
+            lines.append("（等待 agent 生成或载入大纲后，这里实时显示章节与下一级小标题）")
+        else:
+            total = sum(len(children) for _, children in chapters)
+            lines.append("")
+            lines.append(f"共 {len(chapters)} 章 / {total} 条小标题")
+        try:
+            self._set_text_content(widget, "\n".join(lines), readonly=True)
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # 实时文件监听：outline.txt 一有变化就载入编辑器 / 刷新区块结构面板
+    # ------------------------------------------------------------------
+    OUTLINE_WATCH_MS = 600
+
+    def _start_outline_watch(self) -> None:
+        if self._outline_watch_job is not None:
+            return
+        try:
+            self._outline_watch_mtime = self._outline_path().stat().st_mtime
+        except OSError:
+            self._outline_watch_mtime = None
+        try:
+            self._outline_watch_job = self.root.after(
+                self.OUTLINE_WATCH_MS, self._poll_outline_file
+            )
+        except tk.TclError:
+            self._outline_watch_job = None
+
+    def _stop_outline_watch(self) -> None:
+        if self._outline_watch_job is not None:
+            try:
+                self.root.after_cancel(self._outline_watch_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._outline_watch_job = None
+        self._outline_watch_mtime = None
+
+    def _poll_outline_file(self) -> None:
+        self._outline_watch_job = None
+        if self._closing:
+            return
+        path = self._outline_path()
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = None
+        if mtime is not None and mtime != self._outline_watch_mtime:
+            self._outline_watch_mtime = mtime
+            try:
+                content = path.read_text(encoding="utf-8")
+            except OSError:
+                content = ""
+            if content.strip():
+                self._set_text_content(self.outline_text, content)
+                self._update_structure_panel(content)
+                self.append_status("实时载入 outline.txt（含章节小标题）")
+        still_watching = self._agent_busy or self._legacy_outline_running
+        if still_watching and not self._closing:
+            try:
+                self._outline_watch_job = self.root.after(
+                    self.OUTLINE_WATCH_MS, self._poll_outline_file
+                )
+            except tk.TclError:
+                self._outline_watch_job = None
+        else:
+            self._outline_watch_mtime = None
 
     # ------------------------------------------------------------------
     # 关闭窗口
@@ -1804,6 +2071,7 @@ class ThesisGUI:
                 pass
             self._cooldown_job = None
         self._cooldown_waiting = False
+        self._stop_outline_watch()
 
         runtime = self._runtime
         if runtime is not None:

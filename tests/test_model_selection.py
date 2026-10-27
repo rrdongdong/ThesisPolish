@@ -542,3 +542,89 @@ def test_gui_prints_full_raw_error_detail(gui_app):
     log = app._get_text_content(app.agent_log_text)
     assert "原始错误（完整）" in log
     assert "detail XYZ" in log
+
+
+def test_gui_live_preview_updates_outline_and_structure(gui_app):
+    """tool 参数流应实时把大纲写进编辑器，并同步刷新「章节/小标题」面板。"""
+    import json as _json
+    import types
+
+    app, _root = gui_app
+    app._handle_agent_event(
+        types.SimpleNamespace(
+            kind="toolcall_start",
+            text="thesis_outline_save",
+            data={"toolCallId": "c1", "toolName": "thesis_outline_save"},
+        )
+    )
+    outline_text = (
+        "题目：REALM\n"
+        "摘要：未提供\n"
+        "第一章题目：Introduction\n"
+        "  1.1 Motivation\n"
+        "  1.2 Contributions\n"
+        "第二章题目：Related Works\n"
+        "  2.1 3D Segmentation\n"
+        "第三章题目：Methodology\n"
+        "第四章题目：Experiments\n"
+        "第五章题目：Conclusion\n"
+        "总结：未提供\n"
+        "参考文献：有\n"
+    )
+    payload = _json.dumps({"content": outline_text}, ensure_ascii=False)
+    half = len(payload) // 2
+    for chunk in (payload[:half], payload[half:]):
+        app._handle_agent_event(
+            types.SimpleNamespace(
+                kind="toolcall_delta", text=chunk, data={"toolCallId": "c1"}
+            )
+        )
+    app._handle_agent_event(
+        types.SimpleNamespace(
+            kind="toolcall_end",
+            text="thesis_outline_save",
+            data={"toolCallId": "c1", "toolName": "thesis_outline_save"},
+        )
+    )
+    editor = app._get_text_content(app.outline_text)
+    assert "第一章题目：Introduction" in editor
+    assert "  1.1 Motivation" in editor
+    structure = app._get_text_content(app.agent_structure_text)
+    assert "第一章 Introduction" in structure
+    assert "1.1 Motivation" in structure
+    assert "共 5 章 / 3 条小标题" in structure
+
+
+def test_gui_parse_outline_structure_ignores_unindented_noise(gui_app):
+    app, _root = gui_app
+    chapters = app._parse_outline_structure(
+        "题目：X\n第一章题目：A\n  1.1 a1\n  1.2 a2\n第二章题目：B\n随便一行\n  2.1 b1\n"
+    )
+    assert [title for title, _ in chapters] == ["第一章 A", "第二章 B"]
+    assert chapters[0][1] == ["1.1 a1", "1.2 a2"]
+    assert chapters[1][1] == ["2.1 b1"]
+
+
+def test_gui_outline_file_watcher_updates_editor(gui_app):
+    """传统流程/agent 写 outline.txt 时，文件监听应实时把内容与结构载入 GUI。"""
+    app, root = gui_app
+    work = _workdir()
+    path = work / "outline.txt"
+    path.write_text("题目：旧\n摘要：未提供\n", encoding="utf-8")
+    app.outline_path_var.set(str(path))
+    app._agent_busy = True
+    app._start_outline_watch()
+    time.sleep(0.02)
+    path.write_text(
+        "题目：新论文\n摘要：未提供\n第一章题目：Intro\n  1.1 Motivation\n第二章题目：未提供\n"
+        "第三章题目：未提供\n第四章题目：未提供\n第五章题目：未提供\n总结：未提供\n参考文献：有\n",
+        encoding="utf-8",
+    )
+    assert _pump(
+        root,
+        lambda: "第二章题目" in app._get_text_content(app.outline_text),
+        timeout=5,
+    ), "文件监听未实时更新大纲"
+    assert "1.1 Motivation" in app._get_text_content(app.agent_structure_text)
+    app._agent_busy = False
+    app._stop_outline_watch()

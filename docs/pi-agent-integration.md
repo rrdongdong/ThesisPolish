@@ -31,16 +31,20 @@ PiRuntime  ── spawn ──> node cli.js --mode rpc --provider moonshotai-cn
         │                     --tools read,grep,ls,find,thesis_*
         │                     --system-prompt .pi/prompts/thesis_system.md
         │  stdin: {"id":"...","type":"prompt","message":"..."}
-        │  stdout: JSONL events（text_delta / tool_execution_* / agent_settled ...）
+        │  stdout: JSONL events（text_delta / toolcall_start|delta|end /
+        │          tool_execution_* / agent_settled ...）
         ▼
 pi agent loop ── 调扩展工具 ──> .pi/agent/extensions/thesis-tools.ts
                                      ├─ thesis_pdf_ingest → tools/pdf_ingest.py
-                                     ├─ thesis_outline_validate
-                                     ├─ thesis_outline_save → outline.txt
+                                     │     （返回 preview/headings/structure/tail_preview）
+                                     ├─ thesis_outline_validate（9 字段 + 章节小标题）
+                                     ├─ thesis_outline_save → outline.txt（含缩进小标题）
                                      └─ thesis_save_polished → polished.txt
 ```
 
-事件在读取线程产生，`:class:`PiRuntime` 通过 `on_event` 回调交给 GUI；GUI 只把事件放进 `queue.Queue`，由主线程 `root.after(80ms)` 消费，绝不在回调里碰 tk 控件。
+事件在读取线程产生，`PiRuntime` 通过 `on_event` 回调交给 GUI；GUI 只把事件放进 `queue.Queue`，由主线程 `root.after(80ms)` 消费，绝不在回调里碰 tk 控件。
+
+**实时大纲预览**：`_handle_message_update` 会把 `toolcall_start/delta/end` 映射成同名 `AgentEvent`（带 `toolName`/`toolCallId`）。GUI 只对 `thesis_outline_save` / `thesis_save_polished` 做实时预览：累积工具参数 JSON，用容错解析提取当前 `content`/`text` 字段（即使 JSON 尚未闭合），节流刷新到「大纲编辑器 / 润色输出」；同时 GUI 每 600ms 监听 `outline.txt` 变化（agent 或传统流程写盘时立即载入），并用 `_parse_outline_structure` 把“第X章题目 + 两空格缩进小标题”渲染到「章节 / 小标题结构」面板。
 
 ## 3. 配置隔离（重要）
 
@@ -56,7 +60,8 @@ pi agent loop ── 调扩展工具 ──> .pi/agent/extensions/thesis-tools.t
 - 返回 `{ content: [{type:"text", text}], details: {...} }`；**失败必须 `throw`**（pi 0.85.1 的返回值没有 `isError` 字段，抛错才会让工具结果标记为 `isError:true` 进入模型上下文）。
 - 不使用 `ctx.ui.*`：headless（json/print）模式下无 UI，`confirm()` 会立即返回 false。
 - 所有写入限制在 `ctx.cwd`（项目根）内；写文件走 `withFileMutationQueue`，带 `.bak` 备份。
-- `thesis_pdf_ingest` 通过 `pi` 子进程的 `THESIS_PYTHON`（默认 `python`）调用 `tools/pdf_ingest.py`；正常情况下用管道流式回传进度，若宿主禁止管道（如受限沙箱 EPERM）则回退到「文件重定向 + 同步调用」。
+- `thesis_pdf_ingest` 通过 `pi` 子进程的 `THESIS_PYTHON`（默认 `python`）调用 `tools/pdf_ingest.py`；正常情况下用管道流式回传进度，若宿主禁止管道（如受限沙箱 EPERM）则回退到「文件重定向 + 同步调用」。返回值新增 `structure: [{title, children[]}]`（章 → 下一级小标题），便于模型在低 RPM 场景下不 read 也能写层级大纲。
+- **大纲格式**：9 个固定字段（题目/摘要/第一~五章题目/总结/参考文献）+ 每章行下方两个空格缩进的下一级小标题（如 `  3.1 研究背景`）。`thesis_outline_validate` 会分别校验字段顺序与“小标题只能出现在章节字段之后”，并在 `details.sections/subheadingCount` 返回层级结构；`thesis_outline_save` 原样落盘并返回小标题条数。
 - 工具白名单由 `--tools` 控制（`read,grep,ls,find,thesis_pdf_ingest,thesis_outline_validate,thesis_outline_save,thesis_save_polished`），agent 不能执行 shell、不能任意写文件。
 
 ## 4.1 模型发现与切换（403/404 处理）

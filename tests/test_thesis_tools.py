@@ -838,3 +838,20 @@ def test_detect_headings_markdown_english_and_tail_preview() -> None:
     assert "References" in titles
     assert module.TAIL_PREVIEW_CHARS >= 500
     assert "tail_preview" in module._failure("x")
+
+
+def test_build_structure_groups_second_level_headings() -> None:
+    """pdf_ingest.build_structure：把 level-2 标题挂到最近的 level-1 章下。"""
+    module = _load_helper_module()
+    headings = [
+        {"level": 1, "title": "1 Introduction"},
+        {"level": 2, "title": "1.1 Motivation"},
+        {"level": 3, "title": "1.1.1 detail"},
+        {"level": 1, "title": "2 Related Works"},
+        {"level": 2, "title": "2.1 A"},
+        {"level": 2, "title": "2.2 B"},
+    ]
+    structure = module.build_structure(headings)
+    assert [item["title"] for item in structure] == ["1 Introduction", "2 Related Works"]
+    assert structure[0]["children"] == ["1.1 Motivation"]
+    assert structure[1]["children"] == ["2.1 A", "2.2 B"]

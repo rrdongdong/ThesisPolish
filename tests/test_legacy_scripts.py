@@ -268,3 +268,12 @@ def test_chat_retries_without_temperature_on_400(monkeypatch):
     assert text == "retry-ok"
     assert "temperature" in calls[0]
     assert "temperature" not in calls[1]
+
+
+def test_generate_outline_prompt_requests_subheadings():
+    import generate_outline
+
+    prompt = generate_outline.OUTLINE_PROMPT
+    assert "下一级小标题" in prompt
+    assert "  1.1" in prompt  # 两个空格缩进示例
+    assert "两个空格缩进" in prompt

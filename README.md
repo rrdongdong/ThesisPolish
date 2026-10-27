@@ -9,7 +9,7 @@ Open-source some readily usable tools. At present, I don't know what to write ab
 
 ## 项目介绍 (Project Introduction)
 
-ThesisPolish 面向硕士毕业论文润色场景：从论文 PDF 提取大纲、维护可编辑的九行大纲、按大纲对局部段落做保义润色。
+ThesisPolish 面向硕士毕业论文润色场景：从论文 PDF 提取大纲（9 个固定字段 + 每章下一级小标题）、维护可编辑大纲、按大纲对局部段落做保义润色。
 
 **v2（2026-10）引入了 [pi](https://github.com/earendil-works/pi) agent 框架**：润色流程不再是一段固定 prompt 的单次调用，而是由本地 pi agent 驱动——它会自己上传 PDF、分块阅读正文、校验大纲模板、把结果写入文件，并把每一步的流式输出/工具调用实时显示在 GUI 里。原有「传统流程」完整保留，可随时回退。
 
@@ -18,15 +18,17 @@ This tool is designed for polishing master's thesis. Since v2 it is **agent-driv
 ## 主要特性
 
 - **Agent 助手（pi）**：新增标签页，直接和 agent 对话；「提取大纲」「润色当前段落」一键下发任务，实时显示 `text_delta` 流式文本、工具调用、重试与错误。
+- **实时大纲预览 + 小标题结构**：agent 生成大纲时，大纲编辑器随工具参数流（`toolcall_delta`）**实时刷新**；`outline.txt` 一旦落盘立即载入；新增「章节 / 小标题结构」面板，实时显示每章识别到的**下一级小标题**（如 3.1、3.2）。传统流程运行期间也会监听 `outline.txt` 并实时载入。
+- **层级大纲格式**：`outline.txt` 在 9 个固定字段基础上，每章行下方用两个空格缩进写入该章下一级小标题（`  3.1 研究背景`）；没有就不写，不虚构。
 - **自定义 pi 工具**：`.pi/agent/extensions/thesis-tools.ts` 注册 4 个确定性工具（PDF 正文提取、大纲校验、大纲保存、润色结果保存），文件写入带校验与 `.bak` 备份。
 - **Kimi / Moonshot**：使用 pi 内置 `moonshotai-cn` provider 与 `kimi-k2-0905-preview` 模型（262K 上下文），API Key 只在 GUI 输入并注入子进程环境变量，不落盘。
 - **Agent 模型可切换**：顶部「Agent 模型」下拉框可用当前 API Key 一键拉取账号可用模型列表（`GET /v1/models`），自动挑选较新的 Kimi 模型；模型 404/无权限时自动刷新并切换，选择会记住在 `.thesis/ui_settings.json`。
-- **额度诊断与限流重试**：顶部「查询额度」查余额/代金券，「诊断限流」一键跑 `tools/moonshot_doctor.py`（可用模型列表 / 账户额度 / 最小 chat 请求 + 完整 429 原文与限流响应头；当前模型失败时**自动测试其它可用模型并给出替代建议**），用于排查"升级了 RPM 仍 429"；429/quota 时 pi 自动重试（`.pi/agent/settings.json`：4 次、**20s 起指数退避**，适配 60 秒 RPM 窗口），重试成功后不会再误报失败；若结果文件已落盘但最后汇报被限流，GUI 会自动载入并提示「任务实际已完成」。距上次 429 不足 60 秒时，快捷任务会**自动等待剩余冷却时间后开始**（重试请求同样占用 RPM），`停止` 15 秒未确认会强制结束 pi 进程。`thesis_pdf_ingest` 返回 `preview/headings/tail_preview`，信息足够时 agent 可不调用 `read`，把大纲任务压到 3 次模型调用。
+- **额度诊断与限流重试**：顶部「查询额度」查余额/代金券，「诊断限流」一键跑 `tools/moonshot_doctor.py`（可用模型列表 / 账户额度 / 最小 chat 请求 + 完整 429 原文与限流响应头；当前模型失败时**自动测试其它可用模型并给出替代建议**），用于排查"升级了 RPM 仍 429"；429/quota 时 pi 自动重试（`.pi/agent/settings.json`：4 次、**20s 起指数退避**，适配 60 秒 RPM 窗口），重试成功后不会再误报失败；若结果文件已落盘但最后汇报被限流，GUI 会自动载入并提示「任务实际已完成」。距上次 429 不足 60 秒时，快捷任务会**自动等待剩余冷却时间后开始**（重试请求同样占用 RPM），`停止` 15 秒未确认会强制结束 pi 进程。`thesis_pdf_ingest` 返回 `preview/headings/structure/preview/tail_preview`，信息足够时 agent 可不调用 `read`，把大纲任务压到 3 次模型调用。
 - **低 RPM 兜底**：若 Moonshot 组织限制很低（如 `max RPM: 3`），可改用「传统流程（兼容）」——每个任务只有 1 次 chat 调用，并把当前「Agent 模型」作为 `--model` 传给 `generate_outline.py` / `polish.py`。
 - **长文本安全**：prompt 走 RPC JSON 行 / stdin，绝不放进 Windows 命令行（约 32K 字符上限）；可处理 10 万级字符的论文正文。
 - **可取消、可多轮**：`停止` 发送 abort；`新对话` 新建 pi 会话；GUI 关闭时安全回收 pi 子进程。
 - **传统流程兼容（低 RPM 兜底）**：原 `generate_outline.py` / `polish.py` 保留为**单次 chat 调用**流程，只依赖 `requests`（不再依赖 openai SDK），支持 `--model`；缺 pi/Node 或 429 频繁时优先用它。
-- **离线可验收**：自带 OpenAI + Moonshot Files API 双协议 mock 服务与 108 个 pytest 用例，无需真实 API Key 即可验证完整链路。
+- **离线可验收**：自带 OpenAI + Moonshot Files API 双协议 mock 服务与 115 个 pytest 用例，无需真实 API Key 即可验证完整链路。
 
 ## 系统架构
 
@@ -100,7 +102,7 @@ python GUI.py
 1. 顶部填写 **kimi API 密钥**，选择论文 **PDF 路径**。
 2. （可选）点「Agent 模型」右侧的 **刷新模型**：用当前 API Key 拉取账号可用模型并自动选中较新的 Kimi 模型。默认 `kimi-k2-0905-preview` 若提示 `404 ... Permission denied`，先刷新模型再重试；遇到 `429/quota` 可点 **查询额度** 查看余额，等待约 1 分钟后重试。
 3. 切到「Agent 助手（pi）」标签页（默认）：
-   - **Agent 提取大纲**：agent 会调用 `thesis_pdf_ingest` 上传 PDF；若返回的 `preview/headings/tail_preview` 已足够则直接生成（省一次模型调用），否则读 `.thesis/pdf_text.txt` → `thesis_outline_save` 落盘 `outline.txt`，完成后自动载入左侧大纲编辑器。
+   - **Agent 提取大纲**：agent 会调用 `thesis_pdf_ingest` 上传 PDF；若返回的 `preview/structure/tail_preview` 已足够则直接生成（省一次模型调用），否则读 `.thesis/pdf_text.txt`；生成过程中大纲编辑器**实时刷新**，每章下一级小标题实时显示在「章节 / 小标题结构」面板，最后 `thesis_outline_save` 落盘 `outline.txt`。
    - **Agent 润色当前段落**：填写「润色位置」和「待润色文字」后点击；agent 先读 `outline.txt`/正文上下文，再保义润色并调用 `thesis_save_polished` 写入 `polished.txt`，完成后自动载入输出面板。
    - **发送**：自由对话（可让 agent 读文件、改大纲、解释某段），支持多轮；`新对话` 清空会话，`停止` 中断当前任务。
 4. 状态日志会显示工具调用（`🔧 thesis_pdf_ingest({...})`）、结果（`✅/❌`）、重试与 token 用量。
@@ -131,11 +133,32 @@ python polish.py --position 需要润色文字所在位置 --text "需要润色�
 | 工具 | 作用 | 产物 |
 |---|---|---|
 | `thesis_pdf_ingest {path, force?}` | 上传 PDF 到 Moonshot Files API 并抽取正文，带 sha1 缓存 | `.thesis/pdf_text.txt`、`.thesis/pdf/<sha1>.txt` |
-| `thesis_outline_validate {content}` | 九行模板确定性校验（题目/摘要/第一~五章题目/总结/参考文献） | 校验报告（不写文件） |
-| `thesis_outline_save {content}` | 校验并保存大纲，旧文件备份 | `outline.txt`、`outline.txt.bak` |
+| `thesis_outline_validate {content}` | 校验 9 字段模板 + 章节下缩进小标题（返回 `sections`/`subheadingCount`） | 校验报告（不写文件） |
+| `thesis_outline_save {content}` | 校验并保存层级大纲，旧文件备份 | `outline.txt`、`outline.txt.bak` |
 | `thesis_save_polished {text, position?}` | 保存润色结果，旧文件备份并记录历史 | `polished.txt`、`polished.txt.bak`、`.thesis/polish_history.jsonl` |
 
 Agent 只能使用 `read/grep/ls/find` 四个内置只读工具 + 上述 `thesis_*` 工具（`--tools` 严格白名单），不能随意写文件或执行 shell；所有落盘都由扩展工具完成，带校验/备份/路径约束。
+
+### `outline.txt` 格式（9 字段 + 每章下一级小标题）
+
+```text
+题目：...
+摘要：...
+第一章题目：绪论
+  1.1 研究背景
+  1.2 研究意义
+第二章题目：相关工作
+  2.1 ...
+第三章题目：方法
+第四章题目：实验
+第五章题目：总结与展望
+总结：...
+参考文献：有
+```
+
+- 9 个字段行必须齐全、顺序固定（缺失写“未提供”）；
+- 小标题只出现在“第X章题目”行下方，**两个空格缩进**、保留原文编号，每章最多 8 条、只取直接下一级；
+- 校验允许小标题缺失（会警告），但小标题出现在章节字段之外会报错；`outline.txt` 是纯文本，GUI 的大纲编辑器可继续手动修改。
 
 ## 配置与环境变量
 
@@ -168,11 +191,11 @@ python -m pytest tests -q
 ```
 
 - `tests/mock_openai_server.py`：同时模拟 OpenAI Chat Completions（SSE 流式 + 工具调用脚本）、Moonshot Files API（upload/content）与账户额度接口（balance）。
-- `tests/test_pi_e2e.py`：真实启动 pi，走 JSON 模式与 RPC 主路径，验证 4 个扩展工具真实执行、`outline.txt`/`polished.txt` 真实落盘、`model=` 覆盖真实传给 provider（4 个用例）。
-- `tests/test_model_selection.py`：模型列表/账户额度拉取（成功/空/HTTP 错误/网络错误）、模型 404 与 429 中文提示、GUI 刷新模型/自动切换/提交时传递模型/查询额度、rg/fd 依赖准备（16 个用例）。
+- `tests/test_pi_e2e.py`：真实启动 pi，走 JSON 模式与 RPC 主路径，验证 4 个扩展工具真实执行、`outline.txt`/`polished.txt` 真实落盘、`model=` 覆盖、带章节小标题的大纲校验/保存（5 个用例）。
+- `tests/test_model_selection.py`：模型列表/账户额度拉取、模型 404/429 提示、GUI 刷新模型/自动切换/查询额度/诊断按钮、实时大纲预览/小标题结构面板/文件监听/冷却等待（26 个用例）。
 - `tests/test_agent_runtime.py`：事件解析、CLI 探测、prompt 构建、abort/stop 等（含针对 mock 的 live RPC 用例）。
-- `tests/test_thesis_tools.py`：`tools/pdf_ingest.py` 与 mock Files API 的成功/缓存/失败分支、provider 检查、扩展契约与 agent-loop（11 个用例）。
-- `tests/test_legacy_scripts.py`：旧版脚本（`tools/moonshot_chat.py`、`generate_outline.py`、`polish.py`、`moonshot_doctor.py`）对 mock 的单次调用、429/5xx 重试、temperature 兼容、诊断输出、落盘（8 个用例）。
+- `tests/test_thesis_tools.py`：`tools/pdf_ingest.py`（含 `structure` 层级结构）与 mock Files API、provider 检查、扩展契约与 agent-loop（12 个用例）。
+- `tests/test_legacy_scripts.py`：旧版脚本（`tools/moonshot_chat.py`、`generate_outline.py`、`polish.py`、`moonshot_doctor.py`）对 mock 的单次调用、429/5xx 重试、temperature 兼容、大纲小标题 prompt、诊断输出、落盘（9 个用例）。
 - 无 Node/pi 的环境会自动 skip 端到端用例。
 
 ## 目录结构

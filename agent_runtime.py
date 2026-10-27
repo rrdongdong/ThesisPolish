@@ -606,34 +606,40 @@ def build_outline_prompt(pdf_path: Path) -> str:
     """构造「PDF -> 大纲」任务的 prompt。
 
     要求 agent 先用 ``thesis_pdf_ingest`` 把 PDF 解析到 ``.thesis/pdf_text.txt``，
-    再用 read 分段阅读正文，产出 9 行严格模板大纲，经 ``thesis_outline_validate``
-    校验后用 ``thesis_outline_save`` 落盘 ``outline.txt``；**文件才是交付物**。
+    再依据 ``preview/headings/structure/tail_preview``（必要时 read）产出：
+    9 个固定字段 + 每章行下方两个空格缩进的**下一级小标题**，最后用
+    ``thesis_outline_save`` 落盘 ``outline.txt``；**文件才是交付物**。
     """
     pdf = str(Path(pdf_path))
     return (
-        "【任务】从论文 PDF 中提取大纲，并把结果保存为项目文件。\n"
+        "【任务】从论文 PDF 中提取大纲（含每章的下一级小标题），并把结果保存为项目文件。\n"
         f"【PDF 路径】{pdf}\n"
         "【执行步骤】\n"
         "1. 先调用工具 thesis_pdf_ingest（参数 path 为上面的 PDF 路径，force 可省略），"
         "把 PDF 正文解析到项目内的 .thesis/pdf_text.txt。若返回成功，不要重复解析。\n"
-        "2. 检查 ingest 返回的 JSON：如果 preview 已包含论文题目与完整摘要、headings 已包含各章节标题、"
-        "tail_preview 已包含结论/参考文献附近内容，可直接据此填写模板，**不必再调用 read**"
-        "（可显著减少模型调用次数，避免低 RPM 账号触发 429）；信息不足时才用 read 读取 "
-        ".thesis/pdf_text.txt（第一次 limit=2000，被截断再用 offset 续读）。"
-        "只依据正文真实内容提取，禁止编造题目、章节或摘要。\n"
-        "3. 严格按下面 9 行模板输出（每行“标签：内容”；正文中确实没有的信息写“未提供”，不要删行）：\n"
+        "2. 检查 ingest 返回的 JSON：preview 含题目/摘要、headings 含各级标题、"
+        "structure 给出“章 → 下一级小标题”结构、tail_preview 含结论/参考文献附近内容；"
+        "这些信息足够时可直接填写，**不必再调用 read**（可减少模型调用次数，避免低 RPM 账号 429）。"
+        "信息不足时才用 read 读取 .thesis/pdf_text.txt（第一次 limit=2000，被截断再用 offset 续读）。"
+        "只依据正文真实内容提取，禁止编造题目、章节或小标题。\n"
+        "3. 按下述格式输出：先 9 个固定字段行，然后在每个“第X章题目：…”的下一行用**两个空格缩进**"
+        "列出该章的**下一级小标题**（保留原文编号，如“  3.1 研究背景”），每章只列直接下一级、最多 8 条；"
+        "正文没有小标题就省略，不要虚构：\n"
         "题目：…\n"
         "摘要：…\n"
         "第一章题目：…\n"
+        "  1.1 …\n"
+        "  1.2 …\n"
         "第二章题目：…\n"
+        "  2.1 …\n"
         "第三章题目：…\n"
         "第四章题目：…\n"
         "第五章题目：…\n"
         "总结：…\n"
         "参考文献：…\n"
-        "4. 直接调用 thesis_outline_save 保存（该工具自带九行模板校验，会返回 issues）；"
+        "4. 直接调用 thesis_outline_save 保存（该工具自带校验，会返回 issues）；"
         "若有 issues，按提示修正内容后再次调用 save，不需要单独调用 thesis_outline_validate。\n"
-        "5. 最后用一两句话向我汇报：是否通过校验、保存路径、大纲字符数。\n"
+        "5. 最后用一两句话向我汇报：是否通过校验、小标题条数、保存路径、大纲字符数。\n"
         "【重要】最终交付物是 outline.txt 文件；不要只在聊天回复里给出大纲。"
     )
 
@@ -672,7 +678,8 @@ def build_chat_prompt(text: str) -> str:
         "如果涉及论文内容，先用 read 工具读取项目内的 outline.txt 或 .thesis/pdf_text.txt"
         "（分段读取）再回答，不要编造事实、数据或参考文献。\n"
         "需要保存润色结果时使用 thesis_save_polished 工具；"
-        "需要更新大纲时使用 thesis_outline_validate + thesis_outline_save 工具。\n"
+        "需要更新大纲时使用 thesis_outline_validate + thesis_outline_save 工具"
+        "（每章行下方可用两个空格缩进列出下一级小标题）。\n"
         f"【用户输入】\n{text}"
     )
 
@@ -742,6 +749,8 @@ class PiRuntime:
         self._session_state: dict = {}
         self._task_started_at: Optional[float] = None
         self._turn_index = 0
+        # contentIndex -> {id, name}：用于把 toolcall_delta 归属到具体工具（流式展示参数用）
+        self._active_tool_calls: dict[int, dict] = {}
 
     # ------------------------------------------------------------ 只读属性
     @property
@@ -858,6 +867,7 @@ class PiRuntime:
             self._last_usage = {}
             self._last_error = None
             self._turn_index = 0
+            self._active_tool_calls.clear()
 
         reader = threading.Thread(
             target=self._reader_loop, args=(proc,), name="pi-rpc-reader", daemon=True
@@ -1093,6 +1103,7 @@ class PiRuntime:
             self._stream_parts = []
             self._turn_index = 0
             self._task_started_at = time.monotonic()
+            self._active_tool_calls.clear()
 
         self._emit(
             AgentEvent("status", text="任务已提交，等待 pi 处理…", data={"phase": "prompt_sent"})
@@ -1947,17 +1958,75 @@ class PiRuntime:
                     data={"contentIndex": ame.get("contentIndex") or 0},
                 )
             ]
+        if update_type == "toolcall_start":
+            index = int(ame.get("contentIndex") or 0)
+            info = {
+                "id": str(ame.get("id") or ""),
+                "name": str(ame.get("toolName") or ""),
+            }
+            with self._lock:
+                self._active_tool_calls[index] = info
+            if not info["name"]:
+                return []
+            return [
+                AgentEvent(
+                    "toolcall_start",
+                    text=info["name"],
+                    data={
+                        "toolCallId": info["id"],
+                        "toolName": info["name"],
+                        "contentIndex": index,
+                    },
+                )
+            ]
+        if update_type == "toolcall_delta":
+            delta = ame.get("delta")
+            if not isinstance(delta, str) or not delta:
+                return []
+            index = int(ame.get("contentIndex") or 0)
+            with self._lock:
+                info = dict(self._active_tool_calls.get(index) or {})
+            return [
+                AgentEvent(
+                    "toolcall_delta",
+                    text=delta,
+                    data={
+                        "toolCallId": info.get("id", ""),
+                        "toolName": info.get("name", ""),
+                        "contentIndex": index,
+                    },
+                )
+            ]
         if update_type == "toolcall_end":
+            index = int(ame.get("contentIndex") or 0)
             tool_call = ame.get("toolCall") or {}
-            name = tool_call.get("name") if isinstance(tool_call, dict) else None
+            with self._lock:
+                info = dict(self._active_tool_calls.pop(index, {}) or {})
+            arguments = tool_call.get("arguments") if isinstance(tool_call, dict) else None
+            name = (tool_call.get("name") if isinstance(tool_call, dict) else None) or info.get("name") or ""
+            call_id = (tool_call.get("id") if isinstance(tool_call, dict) else None) or info.get("id") or ""
+            events: list[AgentEvent] = []
             if name:
-                return [
+                events.append(
                     AgentEvent(
                         "status",
                         text=f"准备调用工具：{name}",
                         data={"phase": "toolcall", "toolName": name},
                     )
-                ]
+                )
+            events.append(
+                AgentEvent(
+                    "toolcall_end",
+                    text=str(name),
+                    data={
+                        "toolCallId": call_id,
+                        "toolName": str(name),
+                        "arguments": arguments,
+                        "contentIndex": index,
+                    },
+                )
+            )
+            return events
         return []
 
     def _handle_message_end(self, payload: dict) -> list[AgentEvent]:
