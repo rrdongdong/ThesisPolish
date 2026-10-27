@@ -51,7 +51,7 @@ except Exception as exc:  # noqa: BLE001 - 缺少依赖/文件时也要让 GUI �
 POLL_INTERVAL_MS = 80
 MAX_EVENTS_PER_POLL = 400
 WINDOW_TITLE = "论文大纲提取与段落润色"
-PI_BADGE = "pi 0.85.1 · Kimi · v3.0(2026-10-27)"
+PI_BADGE = "pi 0.85.1 · Kimi · v3.1(2026-10-27)"
 
 # 状态日志标签配色（值 = (前景色 key, 背景色 key)）
 LOG_TAG_COLORS = {
@@ -168,21 +168,23 @@ class ThesisGUI:
     # -- 顶栏 -----------------------------------------------------------
     def _build_header_bar(self) -> None:
         p = self.theme.palette
-        self.header = ui_theme.ThemedPanel(self.root, self.theme, bg_key="surface", height=64)
+        # 不固定高度：让标题 + 副标题按字体自然撑开，避免高 DPI 下副标题被裁掉
+        self.header = ui_theme.ThemedPanel(self.root, self.theme, bg_key="surface")
         self.header.grid(row=0, column=0, sticky="we")
-        self.header.grid_propagate(False)
         self.header.columnconfigure(2, weight=1)
-        ui_theme.Brand(self.header, self.theme).grid(row=0, column=0, padx=(18, 10), pady=14)
+        ui_theme.Brand(self.header, self.theme).grid(row=0, column=0, padx=(18, 10), pady=12)
         titles = tk.Frame(self.header, bd=0, highlightthickness=0, bg=p["surface"])
-        titles.grid(row=0, column=1, sticky="w")
-        ui_theme.ThemedLabel(
+        titles.grid(row=0, column=1, sticky="w", pady=8)
+        self.header_title = ui_theme.ThemedLabel(
             titles, self.theme, "ThesisPolish", fg_key="text", bg_key="surface",
             size=14, weight="bold",
-        ).pack(anchor="w")
-        ui_theme.ThemedLabel(
+        )
+        self.header_title.pack(anchor="w")
+        self.header_subtitle = ui_theme.ThemedLabel(
             titles, self.theme, "论文大纲提取 · 段落润色 · pi agent 驱动",
             fg_key="text_muted", bg_key="surface", size=9,
-        ).pack(anchor="w")
+        )
+        self.header_subtitle.pack(anchor="w", pady=(1, 0))
         right = tk.Frame(self.header, bd=0, highlightthickness=0, bg=p["surface"])
         right.grid(row=0, column=3, sticky="e", padx=(10, 18))
         self.status_pill = ui_theme.Pill(
@@ -196,24 +198,69 @@ class ThesisGUI:
         self.btn_theme.pack(side="left")
         ui_theme.Divider(self.root, self.theme).grid(row=0, column=0, sticky="sew")
 
-    # -- 主体：侧边栏 + 主内容 -------------------------------------------
+    # -- 主体：可拖拽侧边栏 + 主内容 --------------------------------------
     def _build_body(self) -> None:
         p = self.theme.palette
-        body = tk.Frame(self.root, bd=0, highlightthickness=0, bg=p["bg"])
-        body.grid(row=1, column=0, sticky="nsew")
-        body.columnconfigure(2, weight=1)
-        body.rowconfigure(0, weight=1)
-        self.sidebar = ui_theme.ThemedPanel(body, self.theme, bg_key="surface_alt", width=356)
-        self.sidebar.grid(row=0, column=0, sticky="ns")
-        self.sidebar.grid_propagate(False)
+        self.body_paned = ttk.Panedwindow(
+            self.root, orient="horizontal", style="Body.TPanedwindow"
+        )
+        self.body_paned.grid(row=1, column=0, sticky="nsew")
+        self.sidebar = ui_theme.ThemedPanel(
+            self.body_paned, self.theme, bg_key="surface_alt", width=356
+        )
         self.sidebar.columnconfigure(0, weight=1)
-        ui_theme.Divider(body, self.theme).grid(row=0, column=1, sticky="ns")
-        self.main = tk.Frame(body, bd=0, highlightthickness=0, bg=p["bg"])
-        self.main.grid(row=0, column=2, sticky="nsew")
+        self.main = tk.Frame(self.body_paned, bd=0, highlightthickness=0, bg=p["bg"])
         self.main.columnconfigure(0, weight=1)
         self.main.rowconfigure(1, weight=1)
+        self.body_paned.add(self.sidebar, weight=0)
+        self.body_paned.add(self.main, weight=1)
         self._build_sidebar(self.sidebar)
         self._build_main(self.main)
+        self.body_paned.bind("<ButtonRelease-1>", self._on_sash_release)
+        self.root.after_idle(self._restore_sidebar_width)
+
+    def _read_sidebar_width(self) -> int | None:
+        try:
+            data = json.loads(self._ui_settings_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        try:
+            width = int(data.get("sidebar_width") or 0)
+        except (TypeError, ValueError):
+            return None
+        return width if 240 <= width <= 620 else None
+
+    def _restore_sidebar_width(self) -> None:
+        width = self._read_sidebar_width() or 356
+        try:
+            self.body_paned.sashpos(0, width)
+        except tk.TclError:
+            pass
+
+    def _on_sash_release(self, _event=None) -> None:
+        try:
+            width = int(self.body_paned.sashpos(0))
+        except (AttributeError, tk.TclError):
+            return
+        if width < 240:
+            return
+        try:
+            data = json.loads(self._ui_settings_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        if not isinstance(data, dict):
+            data = {}
+        data["sidebar_width"] = width
+        try:
+            path = self._ui_settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError:
+            pass
 
     def _card(self, parent, title=None, hint=None, padding=(14, 12)):
         card = ui_theme.Card(parent, self.theme, title=title, hint=hint, padding=padding)

@@ -279,6 +279,7 @@ def configure_ttk(style: ttk.Style, theme: Theme) -> None:
         pass
     style.configure("TNotebook", background=p["bg"], borderwidth=0)
     style.configure("TPanedwindow", background=p["bg"])
+    style.configure("Body.TPanedwindow", background=p["bg"], sashwidth=6)
     try:
         style.configure("Sash", background=p["border"], sashthickness=6)
     except tk.TclError:

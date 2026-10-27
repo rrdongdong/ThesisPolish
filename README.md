@@ -2,7 +2,7 @@
 
 > 面向硕士毕业论文的 **大纲提取 + 局部保义润色** 桌面工具，由本地 [pi](https://github.com/earendil-works/pi) Agent 驱动；生成过程实时显示在 GUI 中。
 
-![版本](https://img.shields.io/badge/version-v3.0_(2026--10--27)-blue)
+![版本](https://img.shields.io/badge/version-v3.1_(2026--10--27)-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-yellow)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.19-brightgreen)
@@ -41,7 +41,7 @@ v2 起引入 [pi](https://github.com/earendil-works/pi) agent 框架：润色/�
 
 ## 功能特性
 
-- **现代桌面 UI（v3）**：自绘设计体系（`ui_theme.py`）：侧边栏 + 卡片式布局、品牌栏、圆角状态胶囊、三级按钮层次、等宽日志、**深色 / 浅色主题一键切换**（偏好持久化）、高 DPI 感知。
+- **现代桌面 UI（v3）**：自绘设计体系（`ui_theme.py`）：侧边栏 + 卡片式布局、品牌栏、圆角状态胶囊、三级按钮层次、等宽日志、**深色 / 浅色主题一键切换**（偏好持久化）、高 DPI 感知；**侧边栏可拖拽调整宽度**并记忆，品牌栏副标题自适应高 DPI 不裁切。
 - **Agent 驱动（pi）**：Agent 助手标签页支持「提取大纲」「润色当前段落」一键任务与自由多轮对话；工具调用、重试、token 用量、错误原因实时可见。
 - **实时大纲预览**：模型流式生成 `thesis_outline_save` 参数时，Agent 页「大纲实时预览」与大纲编辑器逐字刷新；`outline.txt` 一落盘立即载入。
 - **章节 / 小标题结构面板**：实时显示每章识别到的**下一级小标题**（如 `3.1`、`3.2`），并统计「共 N 章 / M 条小标题」。
@@ -51,7 +51,7 @@ v2 起引入 [pi](https://github.com/earendil-works/pi) agent 框架：润色/�
 - **长文本安全**：prompt 走 RPC JSON 行 / stdin，绝不放进 Windows 命令行（约 32K 字符上限）。
 - **可取消、可多轮**：`停止` 发送 abort（15s 未确认强制结束进程）；`新对话` 新建 pi 会话。
 - **双轨兼容**：传统流程只依赖 `requests`（不再依赖 openai SDK），每个任务仅 1 次模型调用，低 RPM 账号首选。
-- **离线可验收**：内置 OpenAI / Moonshot Files API / 余额接口 mock 服务，118 个 pytest 用例，无需真实 API Key 即可跑通完整链路。
+- **离线可验收**：内置 OpenAI / Moonshot Files API / 余额接口 mock 服务，120 个 pytest 用例，无需真实 API Key 即可跑通完整链路。
 
 ## 界面
 
@@ -239,7 +239,7 @@ ThesisPolish/
 ## 测试
 
 ```powershell
-python -m pytest tests -q        # 当前：118 passed（离线，无需真实 API Key）
+python -m pytest tests -q        # 当前：120 passed（离线，无需真实 API Key）
 ```
 
 - `tests/mock_openai_server.py`：模拟 OpenAI Chat Completions（SSE + 可脚本化工具调用）、Moonshot Files API、账户余额接口；
@@ -277,6 +277,7 @@ python -m pytest tests -q        # 当前：118 passed（离线，无需真实 A
 | v2.3 ~ v2.5 | 2026-10-27 | 模型发现/切换、额度与限流诊断、429 重试与冷却修复、旧版脚本去 openai SDK（requests）、Kimi 固定 temperature 兼容 |
 | v2.6 | 2026-10-27 | 大纲实时预览、章节/小标题结构面板、层级大纲（9 字段 + 每章下一级小标题）、文件实时监听 |
 | v3.0 | 2026-10-27 | **现代 UI 重构**：`ui_theme.py` 设计体系、侧边栏 + 卡片布局、自定义导航、深/浅色主题切换、状态胶囊、高 DPI；新增「大纲实时预览」卡片与主题持久化 |
+| v3.1 | 2026-10-27 | 品牌栏副标题改为自然高度（修复高 DPI 下被裁切）；左侧边栏改为可拖拽分隔条并记忆宽度 |
 
 ## 贡献与提交约定
 

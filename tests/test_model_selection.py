@@ -678,3 +678,35 @@ def test_gui_conn_label_tracks_api_key(gui_app):
     app._on_api_key_changed()
     assert "已配置" in app.conn_label.cget("text")
     app.api_key_var.set("")
+
+
+def test_gui_header_subtitle_is_visible(gui_app):
+    """品牌栏副标题必须自然撑开可见（高 DPI 下不能被固定高度裁掉）。"""
+    app, _root = gui_app
+    assert "论文大纲提取" in app.header_subtitle.cget("text")
+    assert app.header_subtitle.winfo_reqheight() >= 12
+    assert app.header.winfo_reqheight() >= (
+        app.header_title.winfo_reqheight() + app.header_subtitle.winfo_reqheight()
+    )
+
+
+def test_gui_sidebar_width_is_draggable_and_persisted(gui_app):
+    """左侧边栏位于可拖拽 Panedwindow 中：拖动分隔条后宽度写入 ui_settings.json。"""
+    app, root = gui_app
+    root.deiconify()
+    root.update_idletasks()
+    root.update()
+    try:
+        assert app.body_paned.sashpos(0) >= 240
+        app.body_paned.sashpos(0, 420)
+        root.update_idletasks()
+        root.update()
+        assert app.body_paned.sashpos(0) == 420
+        app._on_sash_release()
+        settings = json.loads(
+            (REPO_ROOT / ".thesis" / "ui_settings.json").read_text(encoding="utf-8")
+        )
+        assert settings.get("sidebar_width") == 420
+        app.body_paned.sashpos(0, 356)
+    finally:
+        root.withdraw()
