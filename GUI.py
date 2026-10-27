@@ -27,6 +27,8 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+import ui_theme
+
 BASE_DIR = Path(__file__).resolve().parent
 
 # 保证无论从哪个工作目录启动，都能找到与 GUI.py 同目录的 agent_runtime.py
@@ -49,7 +51,15 @@ except Exception as exc:  # noqa: BLE001 - 缺少依赖/文件时也要让 GUI �
 POLL_INTERVAL_MS = 80
 MAX_EVENTS_PER_POLL = 400
 WINDOW_TITLE = "论文大纲提取与段落润色"
-PI_BADGE = "pi 0.85.1 · Kimi · v2.6(2026-10-27)"
+PI_BADGE = "pi 0.85.1 · Kimi · v3.0(2026-10-27)"
+
+# 状态日志标签配色（值 = (前景色 key, 背景色 key)）
+LOG_TAG_COLORS = {
+    "error": ("error", None),
+    "ok": ("ok", None),
+    "tool": ("accent", None),
+    "muted": ("text_muted", None),
+}
 
 # pi 不可用 / 启动失败时的中文排查指引
 AGENT_GUIDANCE = (
@@ -99,6 +109,13 @@ class ThesisGUI:
         self._outline_watch_mtime: float | None = None
         self._legacy_outline_running = False
         self._banner_wrap = 0
+        self._banner_state = "info"
+
+        # --- 现代 UI 主题（深色 / 浅色，启动前读取上次选择） ---
+        ui_theme.enable_dpi_awareness()
+        self._theme_name = self._read_theme_name()
+        self.theme = ui_theme.Theme(root, self._theme_name)
+        ui_theme.configure_ttk(ttk.Style(root), self.theme)
 
         # --- 两个标签页共享的 StringVars（顶部公共区） ---
         self.api_key_var = tk.StringVar()
@@ -116,6 +133,8 @@ class ThesisGUI:
         self._init_agent_runtime()
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.api_key_var.trace_add("write", lambda *_args: self._on_api_key_changed())
+        self._update_conn_label()
         self._poll_job = self.root.after(POLL_INTERVAL_MS, self._poll_agent_events)
         # 工作线程 → 主线程的通用回调队列（refresh_models 等；不直接跨线程调用 Tk）
         self._ui_poll_job = self.root.after(60, self._poll_ui_calls)
@@ -125,199 +144,428 @@ class ThesisGUI:
     # ------------------------------------------------------------------
     # UI 构建
     # ------------------------------------------------------------------
+
     def _build_ui(self) -> None:
-        self.root.title(WINDOW_TITLE)
+        p = self.theme.palette
+        self.root.title("ThesisPolish · 论文大纲提取与段落润色")
+        self.root.configure(bg=p["bg"])
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=1)
-
-        # 初始尺寸随屏幕自适应，避免在小屏上超出可见区域
         try:
             screen_w = self.root.winfo_screenwidth()
             screen_h = self.root.winfo_screenheight()
-            width = min(1160, max(960, screen_w - 80))
-            height = min(880, max(640, screen_h - 120))
+            width = min(1280, max(1080, screen_w - 96))
+            height = min(900, max(720, screen_h - 140))
             self.root.geometry(f"{width}x{height}")
-            self.root.minsize(900, 640)
+            self.root.minsize(1040, 700)
+        except tk.TclError:
+            pass
+        self._build_header_bar()
+        self._build_body()
+        self._build_statusbar()
+        self._apply_theme(self._theme_name, save=False, rebuild_styles=True)
+
+    # -- 顶栏 -----------------------------------------------------------
+    def _build_header_bar(self) -> None:
+        p = self.theme.palette
+        self.header = ui_theme.ThemedPanel(self.root, self.theme, bg_key="surface", height=64)
+        self.header.grid(row=0, column=0, sticky="we")
+        self.header.grid_propagate(False)
+        self.header.columnconfigure(2, weight=1)
+        ui_theme.Brand(self.header, self.theme).grid(row=0, column=0, padx=(18, 10), pady=14)
+        titles = tk.Frame(self.header, bd=0, highlightthickness=0, bg=p["surface"])
+        titles.grid(row=0, column=1, sticky="w")
+        ui_theme.ThemedLabel(
+            titles, self.theme, "ThesisPolish", fg_key="text", bg_key="surface",
+            size=14, weight="bold",
+        ).pack(anchor="w")
+        ui_theme.ThemedLabel(
+            titles, self.theme, "论文大纲提取 · 段落润色 · pi agent 驱动",
+            fg_key="text_muted", bg_key="surface", size=9,
+        ).pack(anchor="w")
+        right = tk.Frame(self.header, bd=0, highlightthickness=0, bg=p["surface"])
+        right.grid(row=0, column=3, sticky="e", padx=(10, 18))
+        self.status_pill = ui_theme.Pill(
+            right, self.theme, "空闲", fg_key="text_muted", bg_key="surface_alt",
+            surface_key="surface",
+        )
+        self.status_pill.pack(side="left", padx=(0, 10), pady=6)
+        self.btn_theme = ttk.Button(
+            right, text="◐ 浅色", style="Ghost.TButton", command=self._toggle_theme
+        )
+        self.btn_theme.pack(side="left")
+        ui_theme.Divider(self.root, self.theme).grid(row=0, column=0, sticky="sew")
+
+    # -- 主体：侧边栏 + 主内容 -------------------------------------------
+    def _build_body(self) -> None:
+        p = self.theme.palette
+        body = tk.Frame(self.root, bd=0, highlightthickness=0, bg=p["bg"])
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(2, weight=1)
+        body.rowconfigure(0, weight=1)
+        self.sidebar = ui_theme.ThemedPanel(body, self.theme, bg_key="surface_alt", width=356)
+        self.sidebar.grid(row=0, column=0, sticky="ns")
+        self.sidebar.grid_propagate(False)
+        self.sidebar.columnconfigure(0, weight=1)
+        ui_theme.Divider(body, self.theme).grid(row=0, column=1, sticky="ns")
+        self.main = tk.Frame(body, bd=0, highlightthickness=0, bg=p["bg"])
+        self.main.grid(row=0, column=2, sticky="nsew")
+        self.main.columnconfigure(0, weight=1)
+        self.main.rowconfigure(1, weight=1)
+        self._build_sidebar(self.sidebar)
+        self._build_main(self.main)
+
+    def _card(self, parent, title=None, hint=None, padding=(14, 12)):
+        card = ui_theme.Card(parent, self.theme, title=title, hint=hint, padding=padding)
+        return card, card.body
+
+    def _build_sidebar(self, sidebar: tk.Widget) -> None:
+        p = self.theme.palette
+        card, body = self._card(sidebar, "运行配置", "API / 模型")
+        card.grid(row=0, column=0, sticky="we", padx=14, pady=(14, 10))
+        body.columnconfigure(0, weight=1)
+        ui_theme.ThemedLabel(
+            body, self.theme, "API 密钥", fg_key="text_muted", bg_key="card", size=9
+        ).grid(row=0, column=0, sticky="w")
+        self.api_key_entry = ttk.Entry(
+            body, textvariable=self.api_key_var, show="*", style="Card.TEntry"
+        )
+        self.api_key_entry.grid(row=1, column=0, sticky="we", pady=(4, 0))
+        self.btn_api_toggle = ttk.Button(
+            body, text="显示", style="Small.TButton", command=self._toggle_api_visibility
+        )
+        self.btn_api_toggle.grid(row=1, column=1, sticky="e", padx=(6, 0), pady=(4, 0))
+        ui_theme.ThemedLabel(
+            body, self.theme, "模型", fg_key="text_muted", bg_key="card", size=9
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        model_row = tk.Frame(body, bd=0, highlightthickness=0, bg=p["card"])
+        model_row.grid(row=3, column=0, columnspan=2, sticky="we", pady=(4, 0))
+        model_row.columnconfigure(0, weight=1)
+        self.model_combo = ttk.Combobox(
+            model_row, textvariable=self.model_var, values=(self.model_var.get(),)
+        )
+        self.model_combo.grid(row=0, column=0, sticky="we")
+        self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
+        self.btn_refresh_models = ttk.Button(
+            model_row, text="刷新", style="Small.TButton", command=self.refresh_models
+        )
+        self.btn_refresh_models.grid(row=0, column=1, sticky="e", padx=(6, 0))
+        actions = tk.Frame(body, bd=0, highlightthickness=0, bg=p["card"])
+        actions.grid(row=4, column=0, columnspan=2, sticky="we", pady=(10, 0))
+        actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
+        self.btn_balance = ttk.Button(
+            actions, text="查询额度", style="Small.TButton", command=self.check_balance
+        )
+        self.btn_balance.grid(row=0, column=0, sticky="we", padx=(0, 4))
+        self.btn_doctor = ttk.Button(
+            actions, text="诊断限流", style="Small.TButton", command=self.run_doctor
+        )
+        self.btn_doctor.grid(row=0, column=1, sticky="we", padx=(4, 0))
+        self.balance_label = ui_theme.ThemedLabel(
+            body, self.theme, "额度：点击「查询额度」查看", fg_key="text_faint", bg_key="card", size=9
+        )
+        self.balance_label.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+        work, wbody = self._card(sidebar, "工作区", "路径")
+        work.grid(row=1, column=0, sticky="we", padx=14, pady=(0, 10))
+        wbody.columnconfigure(0, weight=1)
+        row = 0
+        for label_text, variable in (
+            ("PDF 路径", self.pdf_path_var),
+            ("大纲文件", self.outline_path_var),
+            ("润色输出", self.output_path_var),
+            ("润色位置", self.position_var),
+        ):
+            ui_theme.ThemedLabel(
+                wbody, self.theme, label_text, fg_key="text_muted", bg_key="card", size=9
+            ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0 if row == 0 else 10, 0))
+            ttk.Entry(wbody, textvariable=variable, style="Card.TEntry").grid(
+                row=row + 1, column=0, sticky="we", pady=(4, 0)
+            )
+            if label_text == "PDF 路径":
+                self.btn_pick_pdf = ttk.Button(
+                    wbody, text="选择", style="Small.TButton", command=self.pick_pdf
+                )
+                self.btn_pick_pdf.grid(row=row + 1, column=1, sticky="e", padx=(6, 0), pady=(4, 0))
+            row += 2
+
+        sidebar.rowconfigure(2, weight=1)
+        footer = tk.Frame(sidebar, bd=0, highlightthickness=0, bg=p["surface_alt"])
+        footer.grid(row=3, column=0, sticky="we", padx=16, pady=(0, 12))
+        self.header_badge = ttk.Label(footer, text=PI_BADGE, style="SidebarMuted.TLabel")
+        self.header_badge.pack(anchor="w")
+        ui_theme.ThemedLabel(
+            footer, self.theme, "MIT License · docs/pi-agent-integration.md",
+            fg_key="text_faint", bg_key="surface_alt", size=8,
+        ).pack(anchor="w", pady=(3, 0))
+
+    def _build_main(self, main: tk.Widget) -> None:
+        p = self.theme.palette
+        nav = tk.Frame(main, bd=0, highlightthickness=0, bg=p["bg"])
+        nav.grid(row=0, column=0, sticky="we", padx=18, pady=(14, 8))
+        self.nav_agent_btn = ui_theme.NavItem(
+            nav, self.theme, "Agent 助手", lambda: self._select_page("agent"), surface_key="bg"
+        )
+        self.nav_agent_btn.pack(side="left")
+        self.nav_legacy_btn = ui_theme.NavItem(
+            nav, self.theme, "传统流程", lambda: self._select_page("legacy"), surface_key="bg"
+        )
+        self.nav_legacy_btn.pack(side="left", padx=(6, 0))
+        # 页面容器：用 tkraise 切换（避免 ttk.Notebook 页签行破坏整体视觉）
+        self._page_container = tk.Frame(main, bd=0, highlightthickness=0, bg=p["bg"])
+        self._page_container.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 14))
+        self._page_container.columnconfigure(0, weight=1)
+        self._page_container.rowconfigure(0, weight=1)
+        self.agent_tab = ttk.Frame(self._page_container, style="TFrame")
+        self.legacy_tab = ttk.Frame(self._page_container, style="TFrame")
+        self.agent_tab.grid(row=0, column=0, sticky="nsew")
+        self.legacy_tab.grid(row=0, column=0, sticky="nsew")
+        # 仅保存页签元数据（自动化测试 / 状态查询用），不参与实际布局
+        self.notebook = ttk.Notebook(main, style="Hidden.TNotebook")
+        meta_agent = ttk.Frame(self.notebook)
+        meta_legacy = ttk.Frame(self.notebook)
+        self.notebook.add(meta_agent, text="Agent 助手（pi）")
+        self.notebook.add(meta_legacy, text="传统流程（兼容）")
+        self._build_agent_tab(self.agent_tab)
+        self._build_legacy_tab(self.legacy_tab)
+        self._select_page("agent")
+
+    def _select_page(self, name: str) -> None:
+        try:
+            index = 0 if name == "agent" else 1
+            self.notebook.select(index)
+            if index == 0:
+                self.agent_tab.tkraise(self.legacy_tab)
+            else:
+                self.legacy_tab.tkraise(self.agent_tab)
+            self.nav_agent_btn.set_active(index == 0)
+            self.nav_legacy_btn.set_active(index == 1)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _on_tab_changed(self, _event=None) -> None:
+        try:
+            index = self.notebook.index(self.notebook.select())
+        except (AttributeError, tk.TclError):
+            return
+        self._select_page("agent" if index == 0 else "legacy")
+
+    def _build_statusbar(self) -> None:
+        p = self.theme.palette
+        wrap = tk.Frame(self.root, bd=0, highlightthickness=0, bg=p["surface"])
+        wrap.grid(row=2, column=0, sticky="we")
+        ui_theme.Divider(wrap, self.theme).pack(fill="x")
+        bar = ui_theme.ThemedPanel(wrap, self.theme, bg_key="surface", height=30)
+        bar.pack(fill="x")
+        bar.grid_propagate(False)
+        bar.columnconfigure(1, weight=1)
+        self.statusbar_label = ui_theme.ThemedLabel(
+            bar, self.theme, "就绪", fg_key="text_muted", bg_key="surface", size=9
+        )
+        self.statusbar_label.grid(row=0, column=0, sticky="w", padx=16, pady=5)
+        self.conn_label = ui_theme.ThemedLabel(
+            bar, self.theme, "○ 密钥未配置", fg_key="text_faint", bg_key="surface", size=9
+        )
+        self.conn_label.grid(row=0, column=2, sticky="e", padx=16, pady=5)
+
+    # -- 主题 -----------------------------------------------------------
+    @classmethod
+    def _read_theme_name(cls) -> str:
+        try:
+            data = json.loads(cls._ui_settings_path().read_text(encoding="utf-8"))
+            name = str(data.get("theme") or "dark") if isinstance(data, dict) else "dark"
+        except (OSError, ValueError, AttributeError):
+            return "dark"
+        return name if name in ("dark", "light") else "dark"
+
+    def _toggle_theme(self) -> None:
+        self._apply_theme("light" if self._theme_name == "dark" else "dark", save=True)
+
+    def _apply_theme(self, name: str, *, save: bool = True, rebuild_styles: bool = True) -> None:
+        self._theme_name = name if name in ("dark", "light") else "dark"
+        self.theme.set_name(self._theme_name)
+        p = self.theme.palette
+        try:
+            self.root.configure(bg=p["bg"])
+        except tk.TclError:
+            pass
+        if rebuild_styles:
+            ui_theme.configure_ttk(ttk.Style(self.root), self.theme)
+        self.theme.apply_all()
+        try:
+            self.root.option_add("*TCombobox*Listbox.background", p["card"])
+            self.root.option_add("*TCombobox*Listbox.foreground", p["text"])
+            self.root.option_add("*TCombobox*Listbox.selectBackground", p["accent"])
+            self.root.option_add("*TCombobox*Listbox.selectForeground", "#FFFFFF")
+        except tk.TclError:
+            pass
+        if getattr(self, "btn_theme", None) is not None:
+            self.btn_theme.configure(text="◐ 浅色" if self._theme_name == "dark" else "◐ 深色")
+        self._update_banner_color()
+        self._update_conn_label()
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+        if save:
+            self._save_ui_settings()
+
+    def _toggle_api_visibility(self) -> None:
+        try:
+            hidden = str(self.api_key_entry.cget("show")) == "*"
+            self.api_key_entry.configure(show="" if hidden else "*")
+            self.btn_api_toggle.configure(text="隐藏" if hidden else "显示")
         except tk.TclError:
             pass
 
-        self._build_header()
+    def _on_api_key_changed(self) -> None:
+        self._update_conn_label()
 
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
-        self.agent_tab = ttk.Frame(self.notebook)
-        self.legacy_tab = ttk.Frame(self.notebook)
-        self.notebook.add(self.agent_tab, text="Agent 助手（pi）")
-        self.notebook.add(self.legacy_tab, text="传统流程（兼容）")
-        self._build_agent_tab(self.agent_tab)
-        self._build_legacy_tab(self.legacy_tab)
-        self.notebook.select(self.agent_tab)
+    def _update_conn_label(self) -> None:
+        label = getattr(self, "conn_label", None)
+        if label is None:
+            return
+        try:
+            has_key = bool(self.api_key_var.get().strip())
+        except tk.TclError:
+            has_key = False
+        label.configure(text="● 密钥已配置" if has_key else "○ 密钥未配置")
+        label.set_fg_key("ok" if has_key else "text_faint")
 
-    def _build_header(self) -> None:
-        """顶部公共区：两个标签页共享的路径/密钥输入。"""
-        header = ttk.Frame(self.root)
-        header.grid(row=0, column=0, sticky="nsew", padx=8, pady=(8, 6))
-        header.columnconfigure(1, weight=1)
+    def _set_status_state(self, state: str, text: str | None = None) -> None:
+        mapping = {
+            "idle": ("空闲", "text_muted", "surface_alt"),
+            "running": ("运行中", "accent", "accent_soft"),
+            "ok": ("就绪", "ok", "ok_soft"),
+            "error": ("错误", "error", "error_soft"),
+        }
+        label, fg, bg = mapping.get(state, mapping["idle"])
+        pill = getattr(self, "status_pill", None)
+        if pill is not None:
+            try:
+                pill.set(text or label, fg_key=fg, bg_key=bg)
+            except tk.TclError:
+                pass
+        bar = getattr(self, "statusbar_label", None)
+        if bar is not None and text:
+            bar.configure(text=self._shorten(text, 140))
 
-        title = ttk.Label(
-            header,
-            text="ThesisPolish · 论文大纲提取与段落润色",
-            font=("Microsoft YaHei UI", 11, "bold"),
-        )
-        title.grid(row=0, column=0, columnspan=2, sticky="w")
-        # 小状态标签：pi 0.85.1 · Kimi（探测后追加可用性）
-        self.header_badge = ttk.Label(header, text=PI_BADGE, foreground="#6b7280")
-        self.header_badge.grid(row=0, column=2, columnspan=2, sticky="e")
-
-        ttk.Label(header, text="kimi API 密钥").grid(
-            row=1, column=0, sticky="w", padx=(0, 8), pady=(6, 2)
-        )
-        self.api_key_entry = ttk.Entry(header, textvariable=self.api_key_var, show="*")
-        self.api_key_entry.grid(row=1, column=1, columnspan=3, sticky="we", pady=(6, 2))
-
-        ttk.Label(header, text="PDF 路径").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Entry(header, textvariable=self.pdf_path_var).grid(
-            row=2, column=1, columnspan=2, sticky="we", pady=2
-        )
-        ttk.Button(header, text="选择 PDF", command=self.pick_pdf).grid(
-            row=2, column=3, sticky="we", padx=(8, 0), pady=2
-        )
-
-        ttk.Label(header, text="大纲文件").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Entry(header, textvariable=self.outline_path_var).grid(
-            row=3, column=1, columnspan=3, sticky="we", pady=2
-        )
-
-        ttk.Label(header, text="润色输出").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Entry(header, textvariable=self.output_path_var).grid(
-            row=4, column=1, columnspan=3, sticky="we", pady=2
-        )
-
-        ttk.Label(header, text="润色位置").grid(row=6, column=0, sticky="w", padx=(0, 8), pady=2)
-        ttk.Entry(header, textvariable=self.position_var).grid(
-            row=6, column=1, columnspan=3, sticky="we", pady=(2, 6)
-        )
-
-        # Agent 模型：可编辑下拉框 + 拉取当前 API Key 可用模型列表
-        ttk.Label(header, text="Agent 模型").grid(
-            row=5, column=0, sticky="w", padx=(0, 8), pady=2
-        )
-        self.model_combo = ttk.Combobox(
-            header,
-            textvariable=self.model_var,
-            values=(self.model_var.get(),),
-        )
-        self.model_combo.grid(row=5, column=1, columnspan=2, sticky="we", pady=2)
-        self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
-        self.btn_refresh_models = ttk.Button(
-            header, text="刷新模型", command=self.refresh_models
-        )
-        self.btn_refresh_models.grid(row=5, column=3, sticky="we", padx=(8, 0), pady=2)
-        self.btn_balance = ttk.Button(header, text="查询额度", command=self.check_balance)
-        self.btn_balance.grid(row=5, column=4, sticky="we", padx=(6, 0), pady=2)
-        self.btn_doctor = ttk.Button(header, text="诊断限流", command=self.run_doctor)
-        self.btn_doctor.grid(row=5, column=5, sticky="we", padx=(6, 0), pady=2)
-
+    def _update_banner_color(self) -> None:
+        banner = getattr(self, "agent_banner", None)
+        if banner is None:
+            return
+        state = getattr(self, "_banner_state", "info")
+        banner.set_fg_key({"ok": "ok", "error": "error", "warn": "warn"}.get(state, "text_muted"))
     # ------------------------------------------------------------------
     # Agent 助手标签页
     # ------------------------------------------------------------------
+
     def _build_agent_tab(self, tab: ttk.Frame) -> None:
+        p = self.theme.palette
         tab.columnconfigure(0, weight=1)
         tab.rowconfigure(2, weight=1)
 
-        # 运行时可用性横幅（中文指引）
-        self.agent_banner = ttk.Label(
-            tab,
-            text="正在检测 pi 运行时…",
-            justify="left",
-            foreground="#92400e",
+        banner_card = ui_theme.Card(tab, self.theme, padding=(14, 10))
+        banner_card.grid(row=0, column=0, sticky="we", pady=(0, 8))
+        self.agent_banner = ui_theme.ThemedLabel(
+            banner_card.body, self.theme, "正在检测 pi 运行时…",
+            fg_key="text_muted", bg_key="card", size=9, justify="left",
         )
-        self.agent_banner.grid(row=0, column=0, sticky="we", padx=8, pady=(8, 4))
+        self.agent_banner.pack(fill="x")
+        self._banner_state = "info"
         tab.bind("<Configure>", self._on_agent_tab_configure)
 
-        # 快捷操作
-        toolbar = ttk.Frame(tab)
-        toolbar.grid(row=1, column=0, sticky="we", padx=8, pady=(0, 4))
-        ttk.Label(toolbar, text="快捷操作：", foreground="#374151").grid(
-            row=0, column=0, sticky="w", padx=(0, 6)
-        )
+        actions = ui_theme.Card(tab, self.theme, padding=(12, 8))
+        actions.grid(row=1, column=0, sticky="we", pady=(0, 8))
+        row = tk.Frame(actions.body, bd=0, highlightthickness=0, bg=p["card"])
+        row.pack(fill="x")
         self.btn_agent_outline = ttk.Button(
-            toolbar, text="Agent 提取大纲", command=self.agent_run_outline
+            row, text="提取大纲", style="Primary.TButton", command=self.agent_run_outline
         )
+        self.btn_agent_outline.pack(side="left", padx=(0, 8))
         self.btn_agent_polish = ttk.Button(
-            toolbar, text="Agent 润色当前段落", command=self.agent_run_polish
+            row, text="润色当前段落", style="Secondary.TButton", command=self.agent_run_polish
         )
+        self.btn_agent_polish.pack(side="left", padx=(0, 8))
         self.btn_load_outline = ttk.Button(
-            toolbar, text="载入大纲到编辑器", command=self.load_outline_to_editor
+            row, text="载入大纲", style="Ghost.TButton", command=self.load_outline_to_editor
         )
+        self.btn_load_outline.pack(side="left", padx=(0, 8))
         self.btn_load_output = ttk.Button(
-            toolbar, text="载入输出到输出面板", command=self.load_output_to_panel
+            row, text="载入输出", style="Ghost.TButton", command=self.load_output_to_panel
         )
-        quick_buttons = (
-            self.btn_agent_outline,
-            self.btn_agent_polish,
-            self.btn_load_outline,
-            self.btn_load_output,
+        self.btn_load_output.pack(side="left")
+
+        content = tk.Frame(tab, bd=0, highlightthickness=0, bg=p["bg"])
+        content.grid(row=2, column=0, sticky="nsew", pady=(0, 8))
+        content.columnconfigure(0, weight=3)
+        content.columnconfigure(1, weight=2)
+        content.rowconfigure(0, weight=1)
+        left = tk.Frame(content, bd=0, highlightthickness=0, bg=p["bg"])
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(0, weight=2)
+        left.rowconfigure(1, weight=1)
+        log_card = ui_theme.Card(left, self.theme, title="状态日志", hint="阶段 · 工具 · 错误")
+        log_card.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self.agent_log_text = self._make_text_with_scroll(
+            log_card.body, height=8, readonly=True, mono=True, tag_colors=LOG_TAG_COLORS
         )
-        for index, button in enumerate(quick_buttons, start=1):
-            button.grid(row=0, column=index, sticky="w", padx=(0, 6))
-
-        # 状态日志 + 流式输出（上下可拖动分栏）
-        paned = ttk.Panedwindow(tab, orient="vertical")
-        paned.grid(row=2, column=0, sticky="nsew", padx=8, pady=(0, 4))
-
-        log_frame = ttk.LabelFrame(paned, text="状态日志（只读：阶段 / 工具调用 / 错误）")
-        stream_frame = ttk.LabelFrame(paned, text="流式输出（只读：助手回复）")
-        structure_frame = ttk.LabelFrame(
-            paned, text="章节 / 小标题结构（实时：随大纲生成刷新）"
+        preview_card = ui_theme.Card(
+            left, self.theme, title="大纲实时预览", hint="随生成刷新"
         )
-        paned.add(log_frame, weight=1)
-        paned.add(stream_frame, weight=2)
-        paned.add(structure_frame, weight=1)
-
-        self.agent_log_text = self._make_text_with_scroll(log_frame, height=8, readonly=True)
-        self.agent_stream_text = self._make_text_with_scroll(stream_frame, height=11, readonly=True)
+        preview_card.grid(row=1, column=0, sticky="nsew")
+        self.agent_outline_preview_text = self._make_text_with_scroll(
+            preview_card.body, height=4, readonly=True, mono=False
+        )
+        right = tk.Frame(content, bd=0, highlightthickness=0, bg=p["bg"])
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=2)
+        right.rowconfigure(1, weight=1)
+        stream_card = ui_theme.Card(right, self.theme, title="流式输出", hint="助手回复")
+        stream_card.grid(row=0, column=0, sticky="nsew", pady=(0, 8))
+        self.agent_stream_text = self._make_text_with_scroll(
+            stream_card.body, height=8, readonly=True, mono=False
+        )
+        structure_card = ui_theme.Card(
+            right, self.theme, title="章节 / 小标题结构", hint="实时"
+        )
+        structure_card.grid(row=1, column=0, sticky="nsew")
         self.agent_structure_text = self._make_text_with_scroll(
-            structure_frame, height=8, readonly=True
+            structure_card.body, height=6, readonly=True, mono=False
         )
-        for tag, color in (
-            ("error", "#b91c1c"),
-            ("ok", "#166534"),
-            ("tool", "#1d4ed8"),
-            ("muted", "#6b7280"),
-        ):
-            self.agent_log_text.tag_configure(tag, foreground=color)
 
-        # 输入区：发送 / 停止 / 新对话
-        input_frame = ttk.LabelFrame(tab, text="输入（Ctrl+Enter 发送）")
-        input_frame.grid(row=3, column=0, sticky="we", padx=8, pady=(0, 8))
-        input_frame.columnconfigure(0, weight=1)
-        self.agent_input_text = tk.Text(input_frame, height=4, wrap="word", undo=True)
-        self.agent_input_text.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=(6, 2))
-        input_scroll = ttk.Scrollbar(
-            input_frame, orient="vertical", command=self.agent_input_text.yview
+        chat = ui_theme.Card(
+            tab, self.theme, title="对话", hint="Ctrl+Enter 发送 · 「停止」可中止任务"
         )
-        input_scroll.grid(row=0, column=1, sticky="ns", pady=(6, 2))
-        self.agent_input_text.configure(yscrollcommand=input_scroll.set)
+        chat.grid(row=3, column=0, sticky="we")
+        body = chat.body
+        body.columnconfigure(0, weight=1)
+        self.agent_input_text = self._make_text_with_scroll(
+            body, height=4, readonly=False, mono=False
+        )
+        bar = tk.Frame(body, bd=0, highlightthickness=0, bg=p["card"])
+        bar.grid(row=1, column=0, sticky="we", pady=(8, 0))
+        ui_theme.ThemedLabel(
+            bar, self.theme, "Enter 换行 · Ctrl+Enter 发送",
+            fg_key="text_faint", bg_key="card", size=9,
+        ).pack(side="left")
+        self.btn_agent_new = ttk.Button(
+            bar, text="新对话", style="Ghost.TButton", command=self.agent_new_session
+        )
+        self.btn_agent_new.pack(side="right", padx=(8, 0))
+        self.btn_agent_stop = ttk.Button(
+            bar, text="停止", style="Danger.TButton", command=self.agent_stop, state="disabled"
+        )
+        self.btn_agent_stop.pack(side="right", padx=(8, 0))
+        self.btn_agent_send = ttk.Button(
+            bar, text="发送", style="Primary.TButton", command=self.agent_send
+        )
+        self.btn_agent_send.pack(side="right")
         self.agent_input_text.bind("<Control-Return>", self._on_agent_input_ctrl_enter)
 
-        button_bar = ttk.Frame(input_frame)
-        button_bar.grid(row=1, column=0, columnspan=2, sticky="we", padx=6, pady=(0, 6))
-        ttk.Label(
-            button_bar,
-            text="Enter 换行；Ctrl+Enter 发送。「停止」可中止当前任务。",
-            foreground="#6b7280",
-        ).pack(side="left")
-        self.btn_agent_new = ttk.Button(button_bar, text="新对话", command=self.agent_new_session)
-        self.btn_agent_new.pack(side="right", padx=(6, 0))
-        self.btn_agent_stop = ttk.Button(
-            button_bar, text="停止", command=self.agent_stop, state="disabled"
-        )
-        self.btn_agent_stop.pack(side="right", padx=(6, 0))
-        self.btn_agent_send = ttk.Button(button_bar, text="发送", command=self.agent_send)
-        self.btn_agent_send.pack(side="right")
-
-        # busy 时需要禁用的动作按钮（载入类本地按钮保持可用）
         self._agent_action_buttons = [
             self.btn_agent_outline,
             self.btn_agent_polish,
@@ -339,74 +587,104 @@ class ThesisGUI:
     # ------------------------------------------------------------------
     # 传统流程（兼容）标签页 —— 原有控件与行为保持不变
     # ------------------------------------------------------------------
+
     def _build_legacy_tab(self, tab: ttk.Frame) -> None:
+        p = self.theme.palette
         tab.columnconfigure(0, weight=1)
-        tab.rowconfigure(3, weight=3)
-        tab.rowconfigure(4, weight=2)
-        tab.rowconfigure(6, weight=2)
-        tab.rowconfigure(7, weight=1)
+        tab.rowconfigure(2, weight=3)
+        tab.rowconfigure(3, weight=2)
 
-        note = ttk.Label(
-            tab,
-            text=(
-                "兼容模式：直接调用 generate_outline.py / polish.py（单次模型调用，"
-                "只依赖 requests 与 MOONSHOT_API_KEY，不需要 openai 包），不依赖 pi 运行时。"
-            ),
-            justify="left",
-            foreground="#6b7280",
+        note_card = ui_theme.Card(tab, self.theme, padding=(14, 10))
+        note_card.grid(row=0, column=0, sticky="we", pady=(0, 8))
+        ui_theme.ThemedLabel(
+            note_card.body, self.theme,
+            "兼容模式：直接调用 generate_outline.py / polish.py（每个任务单次模型调用，"
+            "只依赖 requests），不依赖 pi 运行时。",
+            fg_key="text_muted", bg_key="card", size=9, justify="left",
+        ).pack(fill="x")
+
+        actions = ui_theme.Card(tab, self.theme, padding=(12, 8))
+        actions.grid(row=1, column=0, sticky="we", pady=(0, 8))
+        row = tk.Frame(actions.body, bd=0, highlightthickness=0, bg=p["card"])
+        row.pack(fill="x")
+        self.btn_legacy_outline = ttk.Button(
+            row, text="提取论文大纲", style="Primary.TButton", command=self.run_outline
         )
-        note.grid(row=0, column=0, sticky="we", padx=8, pady=(8, 2))
-
-        self.btn_legacy_outline = ttk.Button(tab, text="提取论文大纲", command=self.run_outline)
-        self.btn_legacy_outline.grid(row=1, column=0, sticky="we", padx=8, pady=(4, 6))
-
-        load_save_row = ttk.Frame(tab)
-        load_save_row.grid(row=2, column=0, sticky="we", padx=8, pady=(0, 6))
-        load_save_row.columnconfigure(0, weight=1)
-        load_save_row.columnconfigure(1, weight=1)
-        ttk.Button(load_save_row, text="加载大纲", command=self.load_outline_to_editor).grid(
-            row=0, column=0, sticky="we"
+        self.btn_legacy_outline.pack(side="left", padx=(0, 8))
+        self.btn_legacy_polish = ttk.Button(
+            row, text="开始润色", style="Secondary.TButton", command=self.run_polish
         )
-        ttk.Button(load_save_row, text="保存大纲", command=self.save_outline_from_editor).grid(
-            row=0, column=1, sticky="we", padx=(6, 0)
+        self.btn_legacy_polish.pack(side="left", padx=(0, 8))
+        ttk.Button(
+            row, text="加载大纲", style="Ghost.TButton", command=self.load_outline_to_editor
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(
+            row, text="保存大纲", style="Ghost.TButton", command=self.save_outline_from_editor
+        ).pack(side="left")
+
+        mid = tk.Frame(tab, bd=0, highlightthickness=0, bg=p["bg"])
+        mid.grid(row=2, column=0, sticky="nsew")
+        mid.columnconfigure(0, weight=3)
+        mid.columnconfigure(1, weight=2)
+        mid.rowconfigure(0, weight=1)
+        outline_card = ui_theme.Card(mid, self.theme, title="大纲可视化", hint="可编辑")
+        outline_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.outline_text = self._make_text_with_scroll(
+            outline_card.body, height=8, readonly=False, mono=False
+        )
+        input_card = ui_theme.Card(mid, self.theme, title="待润色文字", hint="原文")
+        input_card.grid(row=0, column=1, sticky="nsew")
+        self.input_text = self._make_text_with_scroll(
+            input_card.body, height=8, readonly=False, mono=False
         )
 
-        outline_frame = ttk.LabelFrame(tab, text="大纲可视化（可编辑）")
-        outline_frame.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 6))
-        self.outline_text = self._make_text_with_scroll(outline_frame, height=7)
-
-        input_frame = ttk.LabelFrame(tab, text="待润色文字")
-        input_frame.grid(row=4, column=0, sticky="nsew", padx=8, pady=(0, 6))
-        self.input_text = self._make_text_with_scroll(input_frame, height=6)
-
-        self.btn_legacy_polish = ttk.Button(tab, text="开始润色", command=self.run_polish)
-        self.btn_legacy_polish.grid(row=5, column=0, sticky="we", padx=8, pady=(0, 6))
-
-        output_frame = ttk.LabelFrame(tab, text="润色后输出")
-        output_frame.grid(row=6, column=0, sticky="nsew", padx=8, pady=(0, 6))
-        self.output_text = self._make_text_with_scroll(output_frame, height=6)
-
-        status_frame = ttk.LabelFrame(tab, text="状态")
-        status_frame.grid(row=7, column=0, sticky="nsew", padx=8, pady=(0, 8))
-        self.status_text = self._make_text_with_scroll(status_frame, height=4)
+        bottom = tk.Frame(tab, bd=0, highlightthickness=0, bg=p["bg"])
+        bottom.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        bottom.columnconfigure(0, weight=3)
+        bottom.columnconfigure(1, weight=2)
+        bottom.rowconfigure(0, weight=1)
+        output_card = ui_theme.Card(bottom, self.theme, title="润色后输出", hint="结果")
+        output_card.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        self.output_text = self._make_text_with_scroll(
+            output_card.body, height=6, readonly=False, mono=False
+        )
+        status_card = ui_theme.Card(bottom, self.theme, title="状态", hint="日志")
+        status_card.grid(row=0, column=1, sticky="nsew")
+        self.status_text = self._make_text_with_scroll(
+            status_card.body, height=6, readonly=False, mono=True
+        )
 
     # ------------------------------------------------------------------
     # 通用控件工具
     # ------------------------------------------------------------------
-    @staticmethod
+
     def _make_text_with_scroll(
-        parent: tk.Widget, height: int = 8, readonly: bool = False, width: int = 80
+        self,
+        parent: tk.Widget,
+        height: int = 8,
+        readonly: bool = False,
+        width: int = 80,
+        *,
+        mono: bool | None = None,
+        tag_colors: dict | None = None,
     ) -> tk.Text:
-        parent.columnconfigure(0, weight=1)
-        parent.rowconfigure(0, weight=1)
-        text = tk.Text(parent, height=height, width=width, wrap="word", undo=not readonly)
-        text.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=6)
-        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=text.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 6), pady=6)
-        text.configure(yscrollcommand=scrollbar.set)
-        if readonly:
-            text.configure(state="disabled")
-        return text
+        if mono is None:
+            mono = readonly
+        box = ui_theme.BorderedText(
+            parent,
+            self.theme,
+            height=height,
+            readonly=readonly,
+            mono=mono,
+            tag_colors=tag_colors,
+        )
+        box.grid(row=0, column=0, sticky="nsew")
+        try:
+            parent.columnconfigure(0, weight=1)
+            parent.rowconfigure(0, weight=1)
+        except (AttributeError, tk.TclError):
+            pass
+        return box.text
 
     @staticmethod
     def _set_text_content(widget: tk.Text, content: str, *, readonly: bool = False) -> None:
@@ -515,6 +793,17 @@ class ThesisGUI:
             self.status_text.see("end")
         except tk.TclError:
             pass
+        bar = getattr(self, "statusbar_label", None)
+        if bar is not None:
+            line = ""
+            for candidate in (text or "").strip().splitlines():
+                if candidate.strip():
+                    line = candidate.strip()
+            if line:
+                try:
+                    bar.configure(text=self._shorten(line, 140))
+                except tk.TclError:
+                    pass
 
     def load_outline_to_editor(self) -> None:
         path = self._outline_path()
@@ -732,13 +1021,21 @@ class ThesisGUI:
 
     def _save_ui_settings(self) -> None:
         model = self._current_model()
-        if not model:
-            return
+        data: dict = {}
+        try:
+            existing = json.loads(self._ui_settings_path().read_text(encoding="utf-8"))
+            if isinstance(existing, dict):
+                data.update(existing)
+        except (OSError, ValueError):
+            pass
+        if model:
+            data["model"] = model
+        data["theme"] = getattr(self, "_theme_name", "dark")
         try:
             path = self._ui_settings_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
-                json.dumps({"model": model}, ensure_ascii=False, indent=2) + "\n",
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
         except OSError:
@@ -864,12 +1161,19 @@ class ThesisGUI:
             return "—" if value is None else f"¥{float(value):.2f}"
 
         payload = data if isinstance(data, dict) else {}
-        self.append_agent_log(
+        text = (
             "账户额度：可用 "
             f"{_fmt(payload.get('available_balance'))}（现金 {_fmt(payload.get('cash_balance'))}，"
-            f"代金券 {_fmt(payload.get('voucher_balance'))}）",
-            tag="ok",
+            f"代金券 {_fmt(payload.get('voucher_balance'))}）"
         )
+        self.append_agent_log(text, tag="ok")
+        label = getattr(self, "balance_label", None)
+        if label is not None:
+            try:
+                label.configure(text=f"额度：可用 {_fmt(payload.get('available_balance'))}")
+                label.set_fg_key("ok")
+            except tk.TclError:
+                pass
 
     def _on_balance_failed(self, exc: Exception) -> None:
         self._balance_loading = False
@@ -877,6 +1181,13 @@ class ThesisGUI:
         self.append_agent_log(
             f"⚠️ 查询额度失败：{self._shorten(str(exc), 300)}", tag="error"
         )
+        label = getattr(self, "balance_label", None)
+        if label is not None:
+            try:
+                label.configure(text="额度：查询失败")
+                label.set_fg_key("error")
+            except tk.TclError:
+                pass
 
     def _set_doctor_button_state(self, state: str) -> None:
         try:
@@ -1032,9 +1343,11 @@ class ThesisGUI:
                 text=(
                     f"✅ pi 运行时可用：{reason or '就绪'}。可直接使用下方快捷操作，"
                     f"或在输入框中与 agent 多轮对话。{extra}"
-                ),
-                foreground="#166534",
+                )
             )
+            self._banner_state = "ok"
+            self._update_banner_color()
+            self._set_status_state("ok", "pi 运行时已就绪")
             self.append_agent_log(f"pi 运行时就绪：{reason or '就绪'}", tag="ok")
         else:
             if import_failed:
@@ -1051,7 +1364,10 @@ class ThesisGUI:
                     "或设置 THESIS_NODE / THESIS_PI_CLI 环境变量。"
                 )
             self.header_badge.configure(text=f"{PI_BADGE} · ⚠️ 不可用")
-            self.agent_banner.configure(text=detail, foreground="#b91c1c")
+            self.agent_banner.configure(text=detail)
+            self._banner_state = "error"
+            self._update_banner_color()
+            self._set_status_state("error", "pi 运行时不可用")
             self.append_agent_log(
                 f"⚠️ Agent 运行时不可用：{reason or '未知原因'}", tag="error"
             )
@@ -1282,6 +1598,7 @@ class ThesisGUI:
         self._append_final_assistant_text(final_text)
 
         if ok:
+            self._set_status_state("ok", "任务完成")
             self.append_agent_log(f"✅ 任务完成{self._usage_note(usage)}", tag="ok")
             # 按发起时的动作类型自动载入结果文件（写盘由 agent 的 thesis_* 工具完成）
             if action == "outline":
@@ -1289,11 +1606,13 @@ class ThesisGUI:
             elif action == "polish":
                 self._auto_load_output()
         elif aborted:
+            self._set_status_state("idle", "已停止")
             suffix = "（未自动载入结果文件）" if action in ("outline", "polish") else ""
             self.append_agent_log(
                 f"⏹ 任务已停止{self._usage_note(usage)}{suffix}。", tag="muted"
             )
         else:
+            self._set_status_state("error", "任务失败")
             message = self._shorten(str(error or "未知错误"), 300)
             if action is None:
                 # ask() 同步抛错时 runtime 仍会补发 error/done 事件；异常已弹窗提示，
@@ -1448,6 +1767,13 @@ class ThesisGUI:
         self._set_doctor_button_state(
             "disabled" if (busy or self._doctor_running) else "normal"
         )
+        try:
+            if busy:
+                self._set_status_state("running", "运行中…")
+            else:
+                self._set_status_state("idle", "空闲")
+        except Exception:  # noqa: BLE001 - 状态栏为纯展示，失败不影响业务
+            pass
 
     def _begin_agent_action(
         self,
@@ -1974,8 +2300,16 @@ class ThesisGUI:
             lines.append(f"共 {len(chapters)} 章 / {total} 条小标题")
         try:
             self._set_text_content(widget, "\n".join(lines), readonly=True)
+            widget.see("1.0")
         except tk.TclError:
             pass
+        preview = getattr(self, "agent_outline_preview_text", None)
+        if preview is not None:
+            try:
+                self._set_text_content(preview, outline_text or "", readonly=True)
+                preview.see("1.0")
+            except tk.TclError:
+                pass
 
     # ------------------------------------------------------------------
     # 实时文件监听：outline.txt 一有变化就载入编辑器 / 刷新区块结构面板
@@ -2089,6 +2423,7 @@ class ThesisGUI:
 
 
 def main() -> None:
+    ui_theme.enable_dpi_awareness()
     root = tk.Tk()
     app = ThesisGUI(root)
     try:

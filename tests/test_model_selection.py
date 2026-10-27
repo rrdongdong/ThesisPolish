@@ -1,4 +1,4 @@
-"""离线测试：模型发现与模型切换（Agent 模型下拉框 / 自动刷新）。
+﻿"""离线测试：模型发现与模型切换（Agent 模型下拉框 / 自动刷新）。
 
 覆盖：
 - ``agent_runtime.fetch_moonshot_models()`` 对 mock Moonshot API 的成功/空列表/HTTP 错误/网络错误；
@@ -628,3 +628,53 @@ def test_gui_outline_file_watcher_updates_editor(gui_app):
     assert "1.1 Motivation" in app._get_text_content(app.agent_structure_text)
     app._agent_busy = False
     app._stop_outline_watch()
+
+
+def test_gui_theme_toggle_and_persistence(gui_app):
+    """深色/浅色主题切换：状态、按钮文案与 ui_settings.json 持久化。"""
+    app, root = gui_app
+    assert app._theme_name == "dark"
+    assert "浅色" in app.btn_theme.cget("text")
+    app._toggle_theme()
+    root.update_idletasks()
+    assert app._theme_name == "light"
+    assert "深色" in app.btn_theme.cget("text")
+    settings = json.loads((REPO_ROOT / ".thesis" / "ui_settings.json").read_text(encoding="utf-8"))
+    assert settings.get("theme") == "light"
+    app._toggle_theme()
+    root.update_idletasks()
+    assert app._theme_name == "dark"
+
+
+def test_gui_nav_switches_pages_and_status_pill(gui_app):
+    """自定义导航切换页面；状态胶囊随任务状态变化。"""
+    app, root = gui_app
+    app._select_page("legacy")
+    root.update_idletasks()
+    assert app.notebook.index(app.notebook.select()) == 1
+    assert app.nav_legacy_btn._active is True
+    assert app.nav_agent_btn._active is False
+    app._select_page("agent")
+    root.update_idletasks()
+    assert app.notebook.index(app.notebook.select()) == 0
+    assert app.nav_agent_btn._active is True
+
+    app._set_status_state("running", "运行中…")
+    assert app.status_pill._text == "运行中…"
+    app._set_status_state("error", "任务失败")
+    assert app.status_pill._text == "任务失败"
+    assert app.status_pill._fg_key == "error"
+    app._set_status_state("idle", "空闲")
+    assert app.status_pill._text == "空闲"
+
+
+def test_gui_conn_label_tracks_api_key(gui_app):
+    """侧边栏 / 状态栏的密钥状态随输入实时更新。"""
+    app, _root = gui_app
+    app.api_key_var.set("")
+    app._on_api_key_changed()
+    assert "未配置" in app.conn_label.cget("text")
+    app.api_key_var.set("sk-test")
+    app._on_api_key_changed()
+    assert "已配置" in app.conn_label.cget("text")
+    app.api_key_var.set("")

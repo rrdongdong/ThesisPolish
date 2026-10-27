@@ -2,7 +2,7 @@
 
 > 面向硕士毕业论文的 **大纲提取 + 局部保义润色** 桌面工具，由本地 [pi](https://github.com/earendil-works/pi) Agent 驱动；生成过程实时显示在 GUI 中。
 
-![版本](https://img.shields.io/badge/version-v2.6_(2026--10--27)-blue)
+![版本](https://img.shields.io/badge/version-v3.0_(2026--10--27)-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-yellow)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.19-brightgreen)
@@ -41,31 +41,41 @@ v2 起引入 [pi](https://github.com/earendil-works/pi) agent 框架：润色/�
 
 ## 功能特性
 
+- **现代桌面 UI（v3）**：自绘设计体系（`ui_theme.py`）：侧边栏 + 卡片式布局、品牌栏、圆角状态胶囊、三级按钮层次、等宽日志、**深色 / 浅色主题一键切换**（偏好持久化）、高 DPI 感知。
 - **Agent 驱动（pi）**：Agent 助手标签页支持「提取大纲」「润色当前段落」一键任务与自由多轮对话；工具调用、重试、token 用量、错误原因实时可见。
-- **实时大纲预览**：模型流式生成 `thesis_outline_save` 参数时，大纲编辑器逐字刷新；`outline.txt` 一落盘立即载入。
+- **实时大纲预览**：模型流式生成 `thesis_outline_save` 参数时，Agent 页「大纲实时预览」与大纲编辑器逐字刷新；`outline.txt` 一落盘立即载入。
 - **章节 / 小标题结构面板**：实时显示每章识别到的**下一级小标题**（如 `3.1`、`3.2`），并统计「共 N 章 / M 条小标题」。
 - **层级大纲格式**：9 个固定字段 + 每章行下方两个空格缩进的下一级小标题，`thesis_outline_validate` 做确定性校验。
-- **模型可切换**：顶部「Agent 模型」用当前 Key 拉取账号可用模型列表（`GET /v1/models`），404 时自动刷新并切换；选择持久化到 `.thesis/ui_settings.json`。
+- **模型可切换**：顶部「Agent 模型」用当前 Key 拉取账号可用模型列表（`GET /v1/models`），404 时自动刷新并切换；模型与主题选择持久化到 `.thesis/ui_settings.json`。
 - **额度与限流处理**：顶部「查询额度」「诊断限流」；429 自动重试（4 次、20s 起指数退避）、冷却自动等待、重试成功不再误报失败、结果已落盘时自动恢复；兼容 Kimi K2.5+/K3 "只允许 temperature=1" 的限制。
 - **长文本安全**：prompt 走 RPC JSON 行 / stdin，绝不放进 Windows 命令行（约 32K 字符上限）。
 - **可取消、可多轮**：`停止` 发送 abort（15s 未确认强制结束进程）；`新对话` 新建 pi 会话。
 - **双轨兼容**：传统流程只依赖 `requests`（不再依赖 openai SDK），每个任务仅 1 次模型调用，低 RPM 账号首选。
-- **离线可验收**：内置 OpenAI / Moonshot Files API / 余额接口 mock 服务，115 个 pytest 用例，无需真实 API Key 即可跑通完整链路。
+- **离线可验收**：内置 OpenAI / Moonshot Files API / 余额接口 mock 服务，118 个 pytest 用例，无需真实 API Key 即可跑通完整链路。
 
 ## 界面
 
-![界面截图（v1）](picture/GUI.JPG)
+**深色（默认）**——侧边栏运行配置 + 顶部品牌栏 + 自定义导航 + 卡片式内容区：
 
-> 上图为 v1 界面截图；v2 已改为「Agent 助手（pi）」+「传统流程（兼容）」双标签页，并在 Agent 页新增流式输出、实时大纲编辑器与章节小标题结构面板。
+![v3 深色界面](docs/screenshots/gui_v3_dark.png)
+
+**浅色主题**（右上角「◐ 浅色/深色」一键切换，选择会记住）：
+
+![v3 浅色界面](docs/screenshots/gui_v3_light.png)
+
+- Agent 页包含：状态日志、流式输出、**大纲实时预览**、**章节 / 小标题结构**、对话输入；
+- 传统流程页：大纲可视化编辑、待润色文字、润色输出、状态日志（两列卡片布局）。
 
 ## 系统架构
 
 ```text
 GUI.py (tkinter)
-├─ 共享头部：API Key / Agent 模型[刷新] / 额度[查询] / 限流诊断 / PDF / 路径
-├─ Tab 1「Agent 助手（pi）」 ← 默认
-│    状态日志 · 流式输出 · 章节/小标题结构（实时） · 大纲编辑器（实时刷新）
-└─ Tab 2「传统流程（兼容）」 → generate_outline.py / polish.py（单次调用）
+├─ 顶部品牌栏：Logo / 标题 / 状态胶囊 / 主题切换
+├─ 左侧边栏：API 密钥 / 模型[刷新] / 额度[查询] / 限流诊断 / 工作区路径
+├─ 自定义导航：Agent 助手（pi） ← 默认 / 传统流程（兼容）
+│    ├─ Agent：状态日志 · 流式输出 · 大纲实时预览 · 章节小标题结构 · 对话
+│    └─ 传统：generate_outline.py / polish.py（单次调用）
+└─ 底部状态栏：运行状态 / 密钥状态
         │ on_event 回调只入 queue，主线程 root.after(80ms) 轮询
         ▼
 agent_runtime.py（PiRuntime，标准库）
@@ -203,7 +213,8 @@ python polish.py --position "第三章 3.2" --text "待润色文本" --model kim
 
 ```text
 ThesisPolish/
-├─ GUI.py                     # tkinter GUI：Agent 助手 + 传统流程双标签页
+├─ GUI.py                     # tkinter GUI：品牌栏 + 侧边栏 + Agent / 传统流程
+├─ ui_theme.py                # 设计体系：调色板 / 字体 / ttk 样式 / 主题化组件
 ├─ agent_runtime.py           # pi RPC 客户端（PiRuntime / JSON 降级 / prompt 构建）
 ├─ generate_outline.py        # 传统流程：PDF→大纲（Files API + 1 次 chat，requests）
 ├─ polish.py                  # 传统流程：局部润色（1 次 chat，requests）
@@ -216,7 +227,9 @@ ThesisPolish/
 │  ├─ pdf_ingest.py           # PDF → Moonshot Files API → 正文/标题/结构（sha1 缓存）
 │  ├─ moonshot_chat.py        # chat 轻量客户端（requests，temperature 兼容）
 │  └─ moonshot_doctor.py      # 限流/额度/模型权限诊断
-├─ docs/pi-agent-integration.md  # 集成设计说明（架构/契约/事件/Windows/限流）
+├─ docs/
+│  ├─ pi-agent-integration.md # 集成设计说明（架构/契约/事件/Windows/限流）
+│  └─ screenshots/            # v3 深色 / 浅色界面截图
 ├─ tests/                     # 离线测试 + mock 服务 + fixtures
 ├─ requirements.txt
 ├─ LICENSE
@@ -226,12 +239,12 @@ ThesisPolish/
 ## 测试
 
 ```powershell
-python -m pytest tests -q        # 当前：115 passed（离线，无需真实 API Key）
+python -m pytest tests -q        # 当前：118 passed（离线，无需真实 API Key）
 ```
 
 - `tests/mock_openai_server.py`：模拟 OpenAI Chat Completions（SSE + 可脚本化工具调用）、Moonshot Files API、账户余额接口；
 - `tests/test_pi_e2e.py`：真实启动 pi（JSON 模式与 RPC），验证工具执行、`outline.txt`/`polished.txt` 落盘、模型覆盖、章节小标题校验/保存；
-- `tests/test_model_selection.py`：模型/额度/诊断、GUI 实时预览、小标题结构面板、文件监听、冷却等待等；
+- `tests/test_model_selection.py`：模型/额度/诊断、GUI 实时预览、小标题结构面板、文件监听、冷却等待、主题切换/导航/状态胶囊/密钥状态等 UI 行为；
 - `tests/test_agent_runtime.py`：事件解析（含 `toolcall_*` 流式）、CLI 探测、prompt、abort/stop；
 - `tests/test_thesis_tools.py`：PDF 工具、`structure` 层级、扩展契约与 agent-loop；
 - `tests/test_legacy_scripts.py`：传统流程单次调用、429/5xx 重试、temperature 兼容、诊断脚本。
@@ -262,7 +275,8 @@ python -m pytest tests -q        # 当前：115 passed（离线，无需真实 A
 | v1 | 2026-03 ~ 04 | Kimi API 调用、PDF 大纲提取、GUI、大纲可视化编辑、局部润色 |
 | v2.0 | 2026-10-26 | 引入 pi agent：`agent_runtime.py`、4 个扩展工具、Agent 标签页、离线 mock 测试体系 |
 | v2.3 ~ v2.5 | 2026-10-27 | 模型发现/切换、额度与限流诊断、429 重试与冷却修复、旧版脚本去 openai SDK（requests）、Kimi 固定 temperature 兼容 |
-| v2.6 | 2026-10-27 | **大纲实时预览**、**章节/小标题结构面板**、层级大纲（9 字段 + 每章下一级小标题）、文件实时监听 |
+| v2.6 | 2026-10-27 | 大纲实时预览、章节/小标题结构面板、层级大纲（9 字段 + 每章下一级小标题）、文件实时监听 |
+| v3.0 | 2026-10-27 | **现代 UI 重构**：`ui_theme.py` 设计体系、侧边栏 + 卡片布局、自定义导航、深/浅色主题切换、状态胶囊、高 DPI；新增「大纲实时预览」卡片与主题持久化 |
 
 ## 贡献与提交约定
 

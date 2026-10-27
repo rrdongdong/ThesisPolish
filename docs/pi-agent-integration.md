@@ -133,3 +133,15 @@ python -m pytest tests -q
 - 项目按 pi `0.85.1` 的 CLI/事件/扩展 API 验证；升级 pi 后请先跑离线测试，再在线冒烟真实 Kimi（PDF 上传、长文本、tool calling 稳定性与计费）。
 - 模型目录随 pi 版本变化（0.85.1 已含 `kimi-k2.5/kimi-k2.6/kimi-k3` 等）；可用 `THESIS_MODEL`/`THESIS_PROVIDER` 覆盖，或 `pi --list-models kimi` 查看当前目录。
 - 若未来 pi 内置 provider 移除目标模型，可在 `PI_CODING_AGENT_DIR/models.json` 中补充自定义模型条目（格式见 pi `docs/models.md`）。
+
+## 9. v3 现代 UI 设计体系（`ui_theme.py`）
+
+GUI 从「默认 ttk 控件」升级为自带设计语言的桌面界面，全部集中在 `ui_theme.py`：
+
+- **设计 token**：`PALETTES["dark"|"light"]` 定义背景/表面/卡片/描边/正文/次要文字/主色（靛蓝 `#6366F1`）/成功/警告/错误/输入框/控制台/滚动条等颜色；字号沿用 8pt 网格间距。
+- **字体**：界面优先 `Segoe UI Variable Display` → `Microsoft YaHei UI` → `Segoe UI`；日志/代码用 `Cascadia Mono` → `Consolas`；高 DPI 通过 `enable_dpi_awareness()`（Per-Monitor V2）在创建窗口前开启。
+- **ttk 样式**：`configure_ttk()` 统一配置按钮（`Primary/Secondary/Ghost/Danger/Small` 五级）、输入框、下拉框、滚动条、隐藏页签的 Notebook、Panedwindow 等；`clam` 作为基底，避免依赖额外主题包。
+- **主题化控件**：`Card`（描边卡片 + 标题/提示 + body）、`Pill`（圆角状态胶囊）、`NavItem`（自定义导航，选中态主色实心）、`ThemedLabel`、`ThemedText`（日志/编辑器，标签配色随主题）、`BorderedText`、`Brand` 等；所有控件实现 `apply_palette(palette)` 并注册到 `Theme`，切换主题时 `Theme.apply_all()` 一次性换肤。
+- **布局**：顶部品牌栏 + 左侧「运行配置 / 工作区」侧边栏 + 自定义导航（Agent 助手 / 传统流程，`tkraise` 切换，不使用 Notebook 页签行）+ 卡片式内容区 + 底部状态栏；页面切换/状态胶囊/密钥状态均为自定义控件。
+- **持久化**：`.thesis/ui_settings.json` 同时保存 `model` 与 `theme`（深/浅），右上角 `◐` 按钮即时切换，无需重启。
+- **截图**：`docs/screenshots/gui_v3_dark.png`、`gui_v3_light.png`；视觉回归可人工检查这两张图。
