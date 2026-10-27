@@ -86,7 +86,7 @@ pi 内置模型目录（`pi --list-models kimi`）列出的是 pi 已知的模�
   - `thesis_outline_save` 自带校验，prompt 不再强制单独调用 `thesis_outline_validate`（少一次调用）；
   - **重试同样计入 RPM**：间隔太短会让 60 秒窗口一直被占满；因此 retry base delay 设为 20s，GUI 在距上次 429 不足 60 秒时：快捷任务**自动等待剩余冷却时间后开始**，对话任务提示剩余秒数；
   - GUI 在「任务失败但结果文件已落盘」时自动载入并提示「任务实际已完成」；`停止` 15 秒未确认会强制 `stop()` pi 进程，避免后台重试风暴；
-  - 仍频繁 429 时改用「传统流程（兼容）」：`generate_outline.py` / `polish.py` 每个任务只有 1 次 chat 调用，并支持 `--model`（GUI 传当前模型）；
+  - 仍频繁 429 时改用「传统流程（兼容）」：`generate_outline.py` / `polish.py` 每个任务只有 1 次 chat 调用（PDF 正文走 Files API + sha1 缓存，不计入 chat RPM），并支持 `--model`（GUI 传当前模型）。这两个脚本**不再依赖 openai SDK**，改用 `tools/moonshot_chat.py`（requests 直连）——openai 3.x（依赖 httpx2）在部分 Windows/Python 环境会报 `TypeError: process() takes no keyword arguments`，绕开可稳定运行；
   - 或在 Moonshot 控制台充值/申请提高组织 RPM 配额。
 - 429 的错误文案会附带原始错误片段（含 RPM 数字时给出专门提示），并提示查额度/等待/换模型/传统流程兜底。
 - 降低 token 消耗：`thesis_pdf_ingest` 的 `preview=3000` 字符、`tail_preview=1500` 字符，覆盖题目/摘要与结论/参考文献；`grep` 只作可选优化，不可用时不影响主流程。

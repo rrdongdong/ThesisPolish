@@ -7,11 +7,9 @@
 # comments make `pip install -r requirements.txt` fail with UnicodeDecodeError.
 #
 # The pi agent runtime itself does NOT need these packages; they are only used
-# by the Python-side tools and by the legacy scripts.
+# by the Python-side tools / legacy scripts. Legacy scripts talk to Moonshot
+# through plain `requests` (openai SDK is no longer required).
 
-# tools/pdf_ingest.py: calls the Moonshot Files API (upload PDF / download text).
+# tools/pdf_ingest.py + tools/moonshot_chat.py + legacy scripts:
+# Moonshot Files API (PDF -> text) and OpenAI-compatible chat completions.
 requests>=2.31
-
-# Legacy pipeline (generate_outline.py / polish.py) uses the OpenAI SDK against
-# Moonshot's OpenAI-compatible endpoint. Not needed by the pi agent path.
-openai>=1.0

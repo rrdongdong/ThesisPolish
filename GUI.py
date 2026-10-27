@@ -48,7 +48,7 @@ except Exception as exc:  # noqa: BLE001 - 缺少依赖/文件时也要让 GUI �
 POLL_INTERVAL_MS = 80
 MAX_EVENTS_PER_POLL = 400
 WINDOW_TITLE = "论文大纲提取与段落润色"
-PI_BADGE = "pi 0.85.1 · Kimi"
+PI_BADGE = "pi 0.85.1 · Kimi · v2.3(2026-10-27)"
 
 # pi 不可用 / 启动失败时的中文排查指引
 AGENT_GUIDANCE = (
@@ -328,8 +328,8 @@ class ThesisGUI:
         note = ttk.Label(
             tab,
             text=(
-                "兼容模式：直接调用 generate_outline.py / polish.py（需要 openai 包与 "
-                "MOONSHOT_API_KEY），不依赖 pi 运行时。"
+                "兼容模式：直接调用 generate_outline.py / polish.py（单次模型调用，"
+                "只依赖 requests 与 MOONSHOT_API_KEY，不需要 openai 包），不依赖 pi 运行时。"
             ),
             justify="left",
             foreground="#6b7280",
