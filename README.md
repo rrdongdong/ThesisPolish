@@ -21,12 +21,12 @@ This tool is designed for polishing master's thesis. Since v2 it is **agent-driv
 - **自定义 pi 工具**：`.pi/agent/extensions/thesis-tools.ts` 注册 4 个确定性工具（PDF 正文提取、大纲校验、大纲保存、润色结果保存），文件写入带校验与 `.bak` 备份。
 - **Kimi / Moonshot**：使用 pi 内置 `moonshotai-cn` provider 与 `kimi-k2-0905-preview` 模型（262K 上下文），API Key 只在 GUI 输入并注入子进程环境变量，不落盘。
 - **Agent 模型可切换**：顶部「Agent 模型」下拉框可用当前 API Key 一键拉取账号可用模型列表（`GET /v1/models`），自动挑选较新的 Kimi 模型；模型 404/无权限时自动刷新并切换，选择会记住在 `.thesis/ui_settings.json`。
-- **额度诊断与限流重试**：顶部「查询额度」可查 Moonshot 余额/代金券；429/quota 时 pi 自动重试（`.pi/agent/settings.json`：4 次、5s 起指数退避），**重试成功后不会再误报失败**；若结果文件已落盘但最后汇报被限流，GUI 会自动载入并提示「任务实际已完成」。`thesis_pdf_ingest` 返回 `preview/headings/tail_preview`，信息足够时 agent 可不调用 `read`，把大纲任务压到 3 次模型调用（对低 RPM 账号很关键）。
+- **额度诊断与限流重试**：顶部「查询额度」可查 Moonshot 余额/代金券；429/quota 时 pi 自动重试（`.pi/agent/settings.json`：4 次、**20s 起指数退避**，适配 60 秒 RPM 窗口），重试成功后不会再误报失败；若结果文件已落盘但最后汇报被限流，GUI 会自动载入并提示「任务实际已完成」。距上次 429 不足 60 秒时，快捷任务会**自动等待剩余冷却时间后开始**（重试请求同样占用 RPM），`停止` 15 秒未确认会强制结束 pi 进程。`thesis_pdf_ingest` 返回 `preview/headings/tail_preview`，信息足够时 agent 可不调用 `read`，把大纲任务压到 3 次模型调用。
 - **低 RPM 兜底**：若 Moonshot 组织限制很低（如 `max RPM: 3`），可改用「传统流程（兼容）」——每个任务只有 1 次 chat 调用，并把当前「Agent 模型」作为 `--model` 传给 `generate_outline.py` / `polish.py`。
 - **长文本安全**：prompt 走 RPC JSON 行 / stdin，绝不放进 Windows 命令行（约 32K 字符上限）；可处理 10 万级字符的论文正文。
 - **可取消、可多轮**：`停止` 发送 abort；`新对话` 新建 pi 会话；GUI 关闭时安全回收 pi 子进程。
 - **传统流程兼容**：原 `generate_outline.py` / `polish.py` 流程原样保留，缺 pi/Node 时仍可用。
-- **离线可验收**：自带 OpenAI + Moonshot Files API 双协议 mock 服务与 95 个 pytest 用例，无需真实 API Key 即可验证完整链路。
+- **离线可验收**：自带 OpenAI + Moonshot Files API 双协议 mock 服务与 98 个 pytest 用例，无需真实 API Key 即可验证完整链路。
 
 ## 系统架构
 
@@ -201,7 +201,7 @@ ThesisPolish/
 | 启动报 `No API key found` / HTTP 401 | 检查顶部 API Key 是否为 Moonshot 有效 Key（`pi auth check --provider moonshotai-cn --json` 应为 ready） |
 | `Unknown provider "moonshot"` | provider id 是内置的 `moonshotai-cn`（或 `moonshotai`），不是 `moonshot` |
 | 模型不存在 / `404 resource_not_found_error: Not found the model ... or Permission denied` | 该模型不在当前 API Key 的可用范围内：在顶部「Agent 模型」点「刷新模型」，选择列表中的模型后重试（GUI 会自动切换）；也可设置 `THESIS_MODEL`。用 `pi --list-models kimi` 可看 pi 内置目录 |
-| `429` / `rate limit` / `quota`（如 `max RPM: 3`） | 账户限流或额度不足：点顶部「查询额度」查看余额/代金券；pi 已自动重试 4 次（5s 起退避），重试成功后任务不会再误报失败；仍频繁触发说明组织 RPM 配额过低（一次 agent 大纲任务需 3~4 次模型调用），可改用「传统流程（兼容）」单次调用流程，或在 Moonshot 控制台充值/申请提高 RPM |
+| `429` / `rate limit` / `quota`（如 `max RPM: 3`） | 账户限流或额度不足：点顶部「查询额度」查看余额/代金券；pi 已自动重试 4 次（**20s 起退避**），重试请求同样占用 RPM，**同一分钟内反复重试可能持续被限流**——重启任务时若距上次 429 不足 60 秒，快捷任务会自动等待剩余冷却时间后开始（对话任务会提示剩余秒数）；仍频繁触发说明组织 RPM 配额过低（一次 agent 大纲任务需 3~4 次模型调用），可改用「传统流程（兼容）」单次调用流程，或在 Moonshot 控制台充值/申请提高 RPM |
 | 任务日志显示失败，但大纲/润色结果其实已保存 | 新版 GUI 会自动载入本轮已落盘的结果文件并提示「任务实际已完成」；可继续用该文件，或稍后重试收尾步骤 |
 | `grep → ripgrep (rg) is not available` | pi 需要 rg/fd：本项目首次启动会自动从全局 pi 配置复制到 `.pi/agent/bin/`（离线无法下载时）；若仍缺失，agent 会用 `read` 分段读取（prompt 已按此优化），不影响主流程 |
 | 上传 PDF 很慢/失败 | `thesis_pdf_ingest` 需要访问 api.moonshot.cn；检查网络/代理；`.thesis/pdf/` 缓存可复跑 |

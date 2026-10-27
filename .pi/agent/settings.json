@@ -5,6 +5,6 @@
   "retry": {
     "enabled": true,
     "maxRetries": 4,
-    "baseDelayMs": 5000
+    "baseDelayMs": 20000
   }
 }

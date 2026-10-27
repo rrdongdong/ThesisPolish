@@ -78,13 +78,14 @@ pi 内置模型目录（`pi --list-models kimi`）列出的是 pi 已知的模�
 
 ## 4.2 限流（429/quota）与额度诊断
 
-- pi 的 agent 级自动重试在 `.pi/agent/settings.json` 的 `retry` 中配置（本项目：`maxRetries: 4`、`baseDelayMs: 5000`，即 5s/10s/20s/40s 指数退避）；`retry.provider.maxRetries` 保持 0，避免 SDK 层吞掉限流错误。
+- pi 的 agent 级自动重试在 `.pi/agent/settings.json` 的 `retry` 中配置（本项目：`maxRetries: 4`、`baseDelayMs: 20000`，即 20s/40s/80s/160s 指数退避；必须 ≥ 20s，否则短间隔重试本身会持续占满 60 秒 RPM 窗口）；`retry.provider.maxRetries` 保持 0，避免 SDK 层吞掉限流错误。
 - **重试成功的判定**：pi 在失败尝试时会发 `message_end.stopReason="error"` / `auto_retry_start`，重试成功后再发正常 assistant 消息与 `auto_retry_end{success:true}`。`PiRuntime` 会在正常消息/重试成功时清掉 `_last_error`，因此 `agent_settled` → `done.ok=True`；否则会出现「日志写自动重试成功、GUI 却提示任务失败」的误报（已修复并加回归测试）。
 - `agent_runtime.fetch_moonshot_balance(api_key)`：`GET {base}/users/me/balance`（Bearer Key），GUI 顶部「查询额度」按钮用它在后台查询余额/代金券，用于区分「限流」与「余额不足」。
 - **组织级 RPM 限制**：Moonshot 低等级账号可能返回 `request reached organization max RPM: 3`（每分钟仅 3 次请求）。agent 一次大纲任务至少 3~4 次模型调用（ingest → 可选 read → save → 汇报），因此：
   - prompt 已优化为优先使用 `thesis_pdf_ingest` 返回的 `preview/headings/tail_preview` 直接生成大纲，信息足够时**不调用 `read`**（3 次调用即可完成）；
   - `thesis_outline_save` 自带校验，prompt 不再强制单独调用 `thesis_outline_validate`（少一次调用）；
-  - GUI 在「任务失败但结果文件已落盘」时自动载入并提示「任务实际已完成」；
+  - **重试同样计入 RPM**：间隔太短会让 60 秒窗口一直被占满；因此 retry base delay 设为 20s，GUI 在距上次 429 不足 60 秒时：快捷任务**自动等待剩余冷却时间后开始**，对话任务提示剩余秒数；
+  - GUI 在「任务失败但结果文件已落盘」时自动载入并提示「任务实际已完成」；`停止` 15 秒未确认会强制 `stop()` pi 进程，避免后台重试风暴；
   - 仍频繁 429 时改用「传统流程（兼容）」：`generate_outline.py` / `polish.py` 每个任务只有 1 次 chat 调用，并支持 `--model`（GUI 传当前模型）；
   - 或在 Moonshot 控制台充值/申请提高组织 RPM 配额。
 - 429 的错误文案会附带原始错误片段（含 RPM 数字时给出专门提示），并提示查额度/等待/换模型/传统流程兜底。

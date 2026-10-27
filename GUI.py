@@ -84,6 +84,9 @@ class ThesisGUI:
         self._tool_update_seen: dict[str, str] = {}
         self._system_prompt_logged = False
         self._idle_since: float | None = None
+        self._last_quota_error_at: float | None = None  # 上次 429 时间（用于冷却提示）
+        self._cooldown_job: str | None = None  # 冷却等待的 after 任务 id
+        self._cooldown_waiting = False  # 是否正在等待冷却后自动开始
         self._banner_wrap = 0
 
         # --- 两个标签页共享的 StringVars（顶部公共区） ---
@@ -1187,9 +1190,10 @@ class ThesisGUI:
             self._recover_saved_artifact_after_failure(action, str(error or ""))
             # 429 / 额度问题：给出额度/等待/换模型的可操作建议
             if self._looks_like_quota_error(error):
+                self._last_quota_error_at = time.time()
                 self.append_agent_log(
-                    "建议：点顶部「查询额度」确认余额/代金券；等待约 1 分钟后重试；"
-                    "或换用较轻量的模型、减少单次读取的正文量。",
+                    "建议：点顶部「查询额度」确认余额/代金券；**重试请求同样计入 RPM**，"
+                    "请等待 ≥60 秒再发起新任务；或改用「传统流程（兼容）」的单次调用流程。",
                     tag="muted",
                 )
         self._stream_buffer = ""
@@ -1321,11 +1325,23 @@ class ThesisGUI:
         )
 
     def _begin_agent_action(
-        self, kind: str, *, clear_stream: bool = True, clear_log: bool = False
+        self,
+        kind: str,
+        *,
+        clear_stream: bool = True,
+        clear_log: bool = False,
+        retry_call=None,
     ) -> str | None:
-        """校验密钥/运行时，清空上一轮输出并进入 busy 状态；失败返回 None。"""
+        """校验密钥/运行时，清空上一轮输出并进入 busy 状态；失败返回 None。
+
+        ``retry_call``：给定时若距上次 429 不足 60 秒，会自动等待剩余冷却时间后
+        再调用一次（用于「Agent 提取大纲 / 润色」这类快捷任务，避免重试风暴）。
+        """
         if self._agent_busy:
             self._warn("请稍候", "Agent 正在处理中，请先等待完成或点击「停止」。")
+            return None
+        if self._cooldown_waiting:
+            self._warn("请稍候", "正在等待限流冷却（60 秒窗口），稍后会自动开始。")
             return None
         api_key = self.api_key_var.get().strip()
         if not api_key:
@@ -1359,6 +1375,36 @@ class ThesisGUI:
         elif self._get_text_content(self.agent_stream_text).strip():
             # 多轮对话：不覆盖上一轮内容，用分隔线隔开
             self._append_agent_stream("\n\n——— 新消息 ———\n")
+        # 冷却处理：3 RPM 账号在上次 429 后 60 秒内再次发起任务几乎必然再次限流，
+        # 且重试请求同样占用 RPM 配额，因此对快捷任务自动等待剩余冷却时间。
+        last_quota = self._last_quota_error_at
+        if last_quota is not None and (time.time() - last_quota) < 60:
+            wait = max(1, int(60 - (time.time() - last_quota)))
+            if retry_call is not None:
+                self.append_agent_log(
+                    f"⏳ 距上次 429 限流不足 60 秒（重试请求同样占用 RPM），"
+                    f"已安排 {wait} 秒冷却后自动开始…",
+                    tag="error",
+                )
+                self._cooldown_waiting = True
+
+                def _resume() -> None:
+                    self._cooldown_job = None
+                    self._cooldown_waiting = False
+                    if not self._closing:
+                        retry_call()
+
+                try:
+                    self._cooldown_job = self.root.after(wait * 1000, _resume)
+                except tk.TclError:
+                    self._cooldown_waiting = False
+                return None
+            self.append_agent_log(
+                f"⚠️ 距上次 429 限流不足 60 秒（建议再等约 {wait} 秒）。"
+                "重试请求同样占用 RPM 配额，过早重试可能持续被限流；"
+                "也可改用「传统流程（兼容）」标签页的单次调用。",
+                tag="error",
+            )
         self._set_agent_busy(True)
         self._log_system_prompt_once()
         return api_key
@@ -1409,7 +1455,9 @@ class ThesisGUI:
         if not pdf_path.exists():
             self._show_error("文件不存在", f"未找到 PDF 文件：\n{pdf_path}")
             return
-        api_key = self._begin_agent_action("outline", clear_stream=True, clear_log=True)
+        api_key = self._begin_agent_action(
+            "outline", clear_stream=True, clear_log=True, retry_call=self.agent_run_outline
+        )
         if not api_key:
             return
         self.append_agent_log("=" * 60, tag="muted")
@@ -1454,7 +1502,9 @@ class ThesisGUI:
                 "（可直接使用「Agent 提取大纲」或「传统流程」的「提取论文大纲」。）",
             )
             return
-        api_key = self._begin_agent_action("polish", clear_stream=True, clear_log=True)
+        api_key = self._begin_agent_action(
+            "polish", clear_stream=True, clear_log=True, retry_call=self.agent_run_polish
+        )
         if not api_key:
             return
         self.append_agent_log("=" * 60, tag="muted")
@@ -1519,16 +1569,29 @@ class ThesisGUI:
                 pass
 
     def _abort_watchdog(self) -> None:
-        """abort 15s 仍未收到 done 时恢复界面，避免按钮永久禁用。"""
+        """abort 15s 仍未收到 done 时强制结束后台 pi 进程，并恢复界面。"""
         if self._closing or not self._agent_busy:
             return
         self._pending_action = None
         self._idle_since = None
+        self._action_started_at = None
         self._set_agent_busy(False)
         self.append_agent_log(
-            "⚠️ 停止确认超时（15s），已恢复操作按钮；如仍无响应可关闭窗口重开。",
+            "⚠️ 停止确认超时（15s）：pi 可能仍在自动重试 429。已恢复操作按钮并尝试强制结束后台进程…",
             tag="error",
         )
+        runtime = self._runtime
+        if runtime is not None:
+            try:
+                runtime.stop()
+                self.append_agent_log(
+                    "🛑 已强制结束 pi 运行时；下一次任务会自动重新启动（pi 会话上下文清空）。",
+                    tag="muted",
+                )
+            except Exception as exc:  # noqa: BLE001 - 关闭失败不应影响 UI
+                self.append_agent_log(
+                    f"⚠️ 强制结束 pi 运行时失败：{type(exc).__name__}: {exc}", tag="error"
+                )
 
     def agent_new_session(self) -> None:
         """新建 pi 会话并清空两个输出面板。"""
@@ -1648,6 +1711,14 @@ class ThesisGUI:
             except (tk.TclError, ValueError):
                 pass
             self._probe_job = None
+
+        if self._cooldown_job is not None:
+            try:
+                self.root.after_cancel(self._cooldown_job)
+            except (tk.TclError, ValueError):
+                pass
+            self._cooldown_job = None
+        self._cooldown_waiting = False
 
         runtime = self._runtime
         if runtime is not None:

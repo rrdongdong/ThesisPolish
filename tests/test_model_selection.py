@@ -420,3 +420,76 @@ def test_gui_recovers_saved_outline_when_final_step_failed(gui_app):
     log = app._get_text_content(app.agent_log_text)
     assert "任务实际已完成" in log
     assert "题目：REALM" in app._get_text_content(app.outline_text)
+
+
+def test_gui_quota_cooldown_warning(gui_app):
+    """上次 429 后 60 秒内再发起任务，GUI 应提示冷却（避免重试风暴继续占满 RPM 配额）。"""
+    app, _root = gui_app
+    app.api_key_var.set("sk-fake")
+    app._agent_ready = True
+    app._agent_busy = False
+
+    class _FakeRuntime:
+        busy = False
+
+        def ask(self, prompt, *, api_key, model=None, provider=None):
+            pass
+
+    app._runtime = _FakeRuntime()
+    app._last_quota_error_at = time.time() - 5  # 5 秒前刚被 429
+    api_key = app._begin_agent_action("outline", clear_stream=True, clear_log=True)
+    assert api_key == "sk-fake"
+    log = app._get_text_content(app.agent_log_text)
+    assert "距上次 429" in log and "60 秒" in log
+
+
+def test_abort_watchdog_force_stops_runtime(gui_app):
+    """abort 15s 未确认时应强制 stop() pi 运行时，避免后台重试永远占着进程。"""
+    app, _root = gui_app
+    stopped = {"count": 0}
+
+    class _FakeRuntime:
+        busy = True
+
+        def stop(self):
+            stopped["count"] += 1
+            self.busy = False
+
+    app._runtime = _FakeRuntime()
+    app._agent_busy = True
+    app._pending_action = "outline"
+    app._abort_watchdog()
+    assert stopped["count"] == 1
+    assert app._agent_busy is False
+    assert "强制结束" in app._get_text_content(app.agent_log_text)
+
+
+def test_gui_quota_cooldown_auto_starts_after_wait(gui_app):
+    """快捷任务在 429 冷却期内应自动等待剩余时间后开始，而不是立刻再次撞限流。"""
+    app, root = gui_app
+    app.api_key_var.set("sk-fake")
+    app._agent_ready = True
+    app._agent_busy = False
+    asked: list[str] = []
+
+    class _FakeRuntime:
+        busy = False
+
+        def check_available(self):
+            return True, "fake pi 0.85.1 可用"
+
+        def ask(self, prompt, *, api_key, model=None, provider=None):
+            asked.append(prompt)
+
+    app._runtime = _FakeRuntime()
+    pdf = _workdir() / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n%%EOF")
+    app.pdf_path_var.set(str(pdf))
+    app._last_quota_error_at = time.time() - 59.0  # 约 1 秒后冷却结束
+    app.agent_run_outline()
+    assert asked == [], "冷却期内不应立刻发起请求"
+    log = app._get_text_content(app.agent_log_text)
+    assert "自动开始" in log
+
+    assert _pump(root, lambda: bool(asked), timeout=5), "冷却结束后未自动开始"
+    assert len(asked) == 1
