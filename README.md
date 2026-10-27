@@ -61,27 +61,26 @@ v2 起引入 [pi](https://github.com/earendil-works/pi) agent 框架：润色/�
 ## 系统架构
 
 ```text
-┌────────────────────────────── GUI.py (tkinter) ──────────────────────────────┐
-│ 共享头部：API Key / Agent 模型[刷新] / 额度[查询] / 限流诊断 / PDF / 路径      │
-│  ├─ Tab 1「Agent 助手（pi）」 ← 默认                                          │
-│  │     状态日志 · 流式输出 · 章节/小标题结构（实时） · 大纲编辑器（实时刷新）  │
-│  └─ Tab 2「传统流程（兼容）」 → generate_outline.py / polish.py（单次调用）    │
-└───────────────┬───────────────────────────────────────────────────────────────┘
-                │ on_event 回调只入 queue，主线程 root.after(80ms) 轮询
-                ▼
-      agent_runtime.py（PiRuntime，标准库）
-       │  主路径：node <pi-cli.js> --mode rpc（长驻、流式、abort、多轮）
-       │  降级：--mode json 一次性进程（正文经 stdin，无 argv 长度限制）
-       ▼
-  pi 0.85.1（Node）── provider: moonshotai-cn / 可切换 Kimi 模型
-       │  工具白名单：read, grep, ls, find + thesis_*
-       ▼
-  .pi/agent/extensions/thesis-tools.ts（TypeScript，pi 直接加载，无需编译）
-       ├─ thesis_pdf_ingest      → tools/pdf_ingest.py → Moonshot Files API
-       │     返回 preview / headings / structure / tail_preview（带 sha1 缓存）
-       ├─ thesis_outline_validate → 9 字段 + 章节小标题确定性校验
-       ├─ thesis_outline_save     → outline.txt（校验 + .bak 备份）
-       └─ thesis_save_polished    → polished.txt（.bak + 润色历史 JSONL）
+GUI.py (tkinter)
+├─ 共享头部：API Key / Agent 模型[刷新] / 额度[查询] / 限流诊断 / PDF / 路径
+├─ Tab 1「Agent 助手（pi）」 ← 默认
+│    状态日志 · 流式输出 · 章节/小标题结构（实时） · 大纲编辑器（实时刷新）
+└─ Tab 2「传统流程（兼容）」 → generate_outline.py / polish.py（单次调用）
+        │ on_event 回调只入 queue，主线程 root.after(80ms) 轮询
+        ▼
+agent_runtime.py（PiRuntime，标准库）
+        │ 主路径：node <pi-cli.js> --mode rpc（长驻、流式、abort、多轮）
+        │ 降级：--mode json 一次性进程（正文经 stdin，无 argv 长度限制）
+        ▼
+pi 0.85.1（Node）── provider: moonshotai-cn / 可切换 Kimi 模型
+        │ 工具白名单：read, grep, ls, find + thesis_*
+        ▼
+.pi/agent/extensions/thesis-tools.ts（TypeScript，pi 直接加载，无需编译）
+     ├─ thesis_pdf_ingest        → tools/pdf_ingest.py → Moonshot Files API
+     │     返回 preview / headings / structure / tail_preview（带 sha1 缓存）
+     ├─ thesis_outline_validate  → 9 字段 + 章节小标题确定性校验
+     ├─ thesis_outline_save      → outline.txt（校验 + .bak 备份）
+     └─ thesis_save_polished     → polished.txt（.bak + 润色历史 JSONL）
 ```
 
 - GUI 与 pi 之间是**严格 JSONL 协议**（RPC）：命令带 `id`、事件带类型；`toolcall_start/delta/end` 被转成 GUI 事件，用于实时预览工具参数中的 `content`。
