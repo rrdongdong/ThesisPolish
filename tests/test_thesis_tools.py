@@ -809,3 +809,32 @@ def test_extension_outline_save_tool(workdir: Path) -> None:
     assert (project_dir / "outline.txt").read_text(encoding="utf-8") == GOOD_OUTLINE + "\n"
     assert (project_dir / "outline.txt.bak").read_text(encoding="utf-8") == "旧的大纲内容\n"
     assert details.get("valid") is True
+
+
+def test_detect_headings_markdown_english_and_tail_preview() -> None:
+    """英文/arXiv 论文常见 "# 1.Introduction" 标题应能识别；ingest 摘要要带 tail_preview。"""
+    module = _load_helper_module()
+    text = "\n".join(
+        [
+            "# REALM: An MLLM-Agent Framework",
+            "# Abstract",
+            "Abstract Bridging the gap between complex human instructions...",
+            "# 1.Introduction",
+            "Body text",
+            "# 2.Related Works",
+            "Body text",
+            "# 3.Methodology",
+            "# 4.Experiments",
+            "# 5.Conclusion",
+            "# References",
+            "[1] A reference.",
+        ]
+    )
+    titles = [heading["title"] for heading in module.detect_headings(text)]
+    assert "Abstract" in titles
+    assert any("Introduction" in title for title in titles)
+    assert any("Related Works" in title for title in titles)
+    assert any("Conclusion" in title for title in titles)
+    assert "References" in titles
+    assert module.TAIL_PREVIEW_CHARS >= 500
+    assert "tail_preview" in module._failure("x")

@@ -28,7 +28,7 @@ def main() -> int:
     parser.add_argument("--position", required=True)
     parser.add_argument("--text", required=True)
     parser.add_argument("--output", default="polished.txt")
-    parser.add_argument("--model", default="kimi-k2-0905-preview")
+    parser.add_argument("--model", default=os.getenv("THESIS_MODEL", "kimi-k2-0905-preview"))
     args = parser.parse_args()
 
     outline_path = Path(args.outline)

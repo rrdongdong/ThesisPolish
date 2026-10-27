@@ -78,6 +78,7 @@ class ThesisGUI:
         self._agent_available_reason = ""
         self._agent_busy = False
         self._pending_action: str | None = None  # "outline" / "polish" / "chat"
+        self._action_started_at: float | None = None  # 本轮任务开始时间（判断文件是否本轮落盘）
         self._stream_buffer = ""  # 本轮已显示的助手 delta 累积
         self._last_agent_error = ""
         self._tool_update_seen: dict[str, str] = {}
@@ -582,7 +583,8 @@ class ThesisGUI:
             return
 
         self.append_status("开始提取大纲...")
-        cmd = [sys.executable, str(script), pdf_path]
+        model = self._current_model() or "kimi-k2-0905-preview"
+        cmd = [sys.executable, str(script), pdf_path, "--model", model]
 
         def on_success() -> None:
             self.append_status("大纲提取完成")
@@ -611,6 +613,7 @@ class ThesisGUI:
 
         self.save_outline_from_editor()
         self.append_status("开始润色...")
+        model = self._current_model() or "kimi-k2-0905-preview"
         cmd = [
             sys.executable,
             str(script),
@@ -622,6 +625,8 @@ class ThesisGUI:
             text,
             "--output",
             str(self._output_path()),
+            "--model",
+            model,
         ]
 
         def on_success() -> None:
@@ -1178,6 +1183,8 @@ class ThesisGUI:
                 )
             # 模型 404 / 无权限时，自动拉取该 API Key 的可用模型列表并切换
             self._maybe_refresh_models_after_model_error(error)
+            # 429 等失败：若本轮结果文件已成功落盘，仍自动载入并提示「实际已完成」
+            self._recover_saved_artifact_after_failure(action, str(error or ""))
             # 429 / 额度问题：给出额度/等待/换模型的可操作建议
             if self._looks_like_quota_error(error):
                 self.append_agent_log(
@@ -1187,6 +1194,7 @@ class ThesisGUI:
                 )
         self._stream_buffer = ""
         self._tool_update_seen = {}
+        self._action_started_at = None
 
     def _append_final_assistant_text(self, final_text: str) -> None:
         """done 时确保最终回复完整可见（流式内容缺失时补全）。"""
@@ -1338,6 +1346,7 @@ class ThesisGUI:
             return None
 
         self._pending_action = kind
+        self._action_started_at = time.time()
         self._stream_buffer = ""
         self._last_agent_error = ""
         self._tool_update_seen = {}
@@ -1542,6 +1551,38 @@ class ThesisGUI:
         self._set_text_content(self.agent_log_text, "", readonly=True)
         self._set_text_content(self.agent_stream_text, "", readonly=True)
         self.append_agent_log("🆕 已新建对话（清空上下文），等待输入。", tag="ok")
+
+    def _recover_saved_artifact_after_failure(self, action: str | None, error_text: str) -> None:
+        """任务最终失败时，若本轮结果文件其实已成功落盘，则自动载入并提示「实际已完成」。
+
+        典型场景：agent 已完成 thesis_outline_save，但最后一步（汇报/收尾）模型调用
+        被 429 限流；此时不应让用户误以为结果丢了。
+        """
+        if action not in ("outline", "polish"):
+            return
+        artifact = self._outline_path() if action == "outline" else self._output_path()
+        started = self._action_started_at
+        if started is None:
+            return
+        try:
+            fresh = artifact.is_file() and artifact.stat().st_mtime >= (started - 1.0)
+        except OSError:
+            fresh = False
+        if not fresh:
+            return
+        if action == "outline":
+            self._auto_load_outline()
+        else:
+            self._auto_load_output()
+        self.append_agent_log(
+            "✅ 本轮结果文件已成功落盘：虽然最后一步（汇报/收尾）失败，任务实际已完成。",
+            tag="ok",
+        )
+        self.append_agent_log(
+            "提示：若账号组织 RPM 很低（例如 3 RPM），可改用「传统流程（兼容）」标签页的单次调用流程，"
+            "或到 Moonshot 控制台申请提高 RPM。",
+            tag="muted",
+        )
 
     def _auto_load_outline(self) -> None:
         """Agent 大纲任务完成后自动把 outline.txt 载入大纲编辑器。"""

@@ -43,8 +43,8 @@
 
 | 工具 | 用途 |
 |---|---|
-| `thesis_pdf_ingest {path, force?}` | 上传 PDF → 导出正文到 `.thesis/pdf_text.txt`，返回 JSON 摘要（ok/text_path/chars/lines/headings/preview/error） |
-| `thesis_outline_validate {content}` | 确定性校验九行模板，返回问题列表（details: `{valid, issues[]}`） |
+| `thesis_pdf_ingest {path, force?}` | 上传 PDF → 导出正文到 `.thesis/pdf_text.txt`，返回 JSON 摘要（ok/text_path/chars/lines/headings/preview/tail_preview/error）；信息足够时可直接据此写大纲，无需再 read |
+| `thesis_outline_validate {content}` | 可选自检：确定性校验九行模板（`thesis_outline_save` 已自带校验，通常无需单独调用） |
 | `thesis_outline_save {content}` | 校验 + 备份旧 `outline.txt` → `outline.txt.bak` + 保存，返回保存路径与警告 |
 | `thesis_save_polished {text, position?}` | 保存润色文本到 `polished.txt`（备份 `.bak`）并追加 `.thesis/polish_history.jsonl` |
 
@@ -53,10 +53,10 @@
 ## 1. 大纲提取
 
 1. 用户给出 PDF 路径时，调用 `thesis_pdf_ingest`；若返回错误，如实转述 `error`（如缺少 API Key、网络失败、文件不存在），**不要伪造大纲**。
-2. 用 `read` 读取 `.thesis/pdf_text.txt`（先 `limit=2000` 一次读完，被截断再 `offset` 续读），只依据正文内容。
+2. 检查 `thesis_pdf_ingest` 的返回：`preview` 含题目/摘要、`headings` 含章节标题、`tail_preview` 含结论/参考文献附近内容时，可直接生成，**不要再调用 `read`**（减少模型调用次数，低 RPM 账号尤其重要）；信息不足时再用 `read` 读取 `.thesis/pdf_text.txt`（先 `limit=2000`，被截断再 `offset` 续读），只依据正文内容。
 3. 按九行模板逐项填写；正文没有的字段写“未提供”。
-4. 调用 `thesis_outline_validate` 自检；有问题先修正 `content` 再重试。
-5. 调用 `thesis_outline_save` 落盘，最后一行汇报保存结果。
+4. 直接调用 `thesis_outline_save` 落盘——它自带九行模板校验并返回 issues；有 issues 时按提示修正后重新 save。**不需要单独调用 `thesis_outline_validate`**（该工具仅作可选自检，目的是减少模型调用次数）。
+5. 最后一行汇报保存结果。
 
 ## 2. 局部润色
 

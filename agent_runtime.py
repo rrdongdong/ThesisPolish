@@ -265,9 +265,19 @@ def humanize_pi_error(raw: Any) -> str:
     if any(k in low for k in ("401", "unauthorized", "invalid api key", "authentication", "invalid_api_key")):
         return "API 密钥无效或已过期（401），请检查 Kimi（Moonshot）密钥。"
     if any(k in low for k in ("429", "rate limit", "rate_limit", "quota")):
+        rpm_match = re.search(r"max\s*RPM\s*[:：]\s*(\d+)", text, re.IGNORECASE)
+        rpm_hint = ""
+        if rpm_match:
+            rpm_hint = (
+                f"检测到当前组织限制为 {rpm_match.group(1)} RPM（每分钟请求数）。"
+                "agent 一次大纲任务至少需要 3~4 次模型调用，会周期性地触发限流；"
+                "pi 会自动等待重试，也可以改用「传统流程（兼容）」的单次调用流程，"
+                "或在 Moonshot 控制台充值/申请提高组织的 RPM 配额。\n"
+            )
         return (
             "请求频率或额度受限（429/quota）。pi 已自动重试；若仍失败：\n"
-            "1) 点击 GUI 顶部「查询额度」确认账户余额/代金券是否充足；\n"
+            + rpm_hint
+            + "1) 点击 GUI 顶部「查询额度」确认账户余额/代金券是否充足；\n"
             "2) 等待约 1 分钟再试（Moonshot 有每分钟 token/请求限额）；\n"
             "3) 换用较轻量的模型（「刷新模型」重新选择），或减少一次读取的正文量。\n"
             "原始错误：" + _summarize(text, 300)
@@ -604,9 +614,11 @@ def build_outline_prompt(pdf_path: Path) -> str:
         "【执行步骤】\n"
         "1. 先调用工具 thesis_pdf_ingest（参数 path 为上面的 PDF 路径，force 可省略），"
         "把 PDF 正文解析到项目内的 .thesis/pdf_text.txt。若返回成功，不要重复解析。\n"
-        "2. 用 read 工具读取 .thesis/pdf_text.txt：第一次读取直接用 limit=2000"
-        "（多数论文一次即可读完）；若返回被截断，再用 offset 续读，直到覆盖"
-        "“摘要 / 各章标题 / 结论 / 参考文献”。只依据正文真实内容提取，禁止编造题目、章节或摘要。\n"
+        "2. 检查 ingest 返回的 JSON：如果 preview 已包含论文题目与完整摘要、headings 已包含各章节标题、"
+        "tail_preview 已包含结论/参考文献附近内容，可直接据此填写模板，**不必再调用 read**"
+        "（可显著减少模型调用次数，避免低 RPM 账号触发 429）；信息不足时才用 read 读取 "
+        ".thesis/pdf_text.txt（第一次 limit=2000，被截断再用 offset 续读）。"
+        "只依据正文真实内容提取，禁止编造题目、章节或摘要。\n"
         "3. 严格按下面 9 行模板输出（每行“标签：内容”；正文中确实没有的信息写“未提供”，不要删行）：\n"
         "题目：…\n"
         "摘要：…\n"
@@ -617,9 +629,9 @@ def build_outline_prompt(pdf_path: Path) -> str:
         "第五章题目：…\n"
         "总结：…\n"
         "参考文献：…\n"
-        "4. 调用 thesis_outline_validate 校验你生成的大纲；若报告 issues，请按提示修正后重新校验，直到通过。\n"
-        "5. 调用 thesis_outline_save 把最终大纲写入项目根目录的 outline.txt（工具会自动备份旧文件）。\n"
-        "6. 最后用一两句话向我汇报：是否通过校验、保存路径、大纲字符数。\n"
+        "4. 直接调用 thesis_outline_save 保存（该工具自带九行模板校验，会返回 issues）；"
+        "若有 issues，按提示修正内容后再次调用 save，不需要单独调用 thesis_outline_validate。\n"
+        "5. 最后用一两句话向我汇报：是否通过校验、保存路径、大纲字符数。\n"
         "【重要】最终交付物是 outline.txt 文件；不要只在聊天回复里给出大纲。"
     )
 
@@ -1830,6 +1842,9 @@ class PiRuntime:
                             )
                         elif stop_reason == "aborted":
                             self._aborted = True
+                        else:
+                            # 最后一次 assistant 消息正常结束：清掉此前重试尝试的错误。
+                            self._last_error = None
                         break
                 will_retry = bool(payload.get("willRetry"))
             if will_retry:
@@ -1857,6 +1872,9 @@ class PiRuntime:
 
         if event_type == "auto_retry_end":
             if payload.get("success"):
+                with self._lock:
+                    # 重试成功：清除失败尝试留下的错误，避免 agent_settled 误报失败。
+                    self._last_error = None
                 return [
                     AgentEvent("status", text="自动重试成功。", data={"phase": "auto_retry_ok"})
                 ]
@@ -1960,6 +1978,10 @@ class PiRuntime:
                 self._last_error = humanize_pi_error(error_message or "模型调用失败")
             elif stop_reason == "aborted":
                 self._aborted = True
+            else:
+                # 正常/工具调用轮次：此前尝试的错误已被重试成功覆盖，必须清掉，
+                # 否则 agent_settled 会把「重试成功」的任务误报为失败。
+                self._last_error = None
         if stop_reason == "error":
             events.append(
                 AgentEvent(

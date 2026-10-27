@@ -1,4 +1,4 @@
-﻿# pi agent 集成说明（ThesisPolish v2）
+# pi agent 集成说明（ThesisPolish v2）
 
 本文记录 ThesisPolish 如何把 [pi](https://github.com/earendil-works/pi) 作为 agent 运行时嵌入桌面 GUI，以及实现/升级时需要知道的约束。适用于 pi `0.85.1`、Node `24.16`、Windows 11、Python 3.12。
 
@@ -79,9 +79,16 @@ pi 内置模型目录（`pi --list-models kimi`）列出的是 pi 已知的模�
 ## 4.2 限流（429/quota）与额度诊断
 
 - pi 的 agent 级自动重试在 `.pi/agent/settings.json` 的 `retry` 中配置（本项目：`maxRetries: 4`、`baseDelayMs: 5000`，即 5s/10s/20s/40s 指数退避）；`retry.provider.maxRetries` 保持 0，避免 SDK 层吞掉限流错误。
+- **重试成功的判定**：pi 在失败尝试时会发 `message_end.stopReason="error"` / `auto_retry_start`，重试成功后再发正常 assistant 消息与 `auto_retry_end{success:true}`。`PiRuntime` 会在正常消息/重试成功时清掉 `_last_error`，因此 `agent_settled` → `done.ok=True`；否则会出现「日志写自动重试成功、GUI 却提示任务失败」的误报（已修复并加回归测试）。
 - `agent_runtime.fetch_moonshot_balance(api_key)`：`GET {base}/users/me/balance`（Bearer Key），GUI 顶部「查询额度」按钮用它在后台查询余额/代金券，用于区分「限流」与「余额不足」。
-- 429 的错误文案会附带原始错误片段，并提示：查额度 → 等 ~1 分钟 → 换较轻量模型/减少单次读取量。
-- 降低 token 消耗：prompt 让 agent 第一次 `read` 就用 `limit=2000` 一次读完正文（被截断再 `offset` 续读），避免多次小段读取放大上下文；`grep` 只作可选优化，不可用时不影响主流程。
+- **组织级 RPM 限制**：Moonshot 低等级账号可能返回 `request reached organization max RPM: 3`（每分钟仅 3 次请求）。agent 一次大纲任务至少 3~4 次模型调用（ingest → 可选 read → save → 汇报），因此：
+  - prompt 已优化为优先使用 `thesis_pdf_ingest` 返回的 `preview/headings/tail_preview` 直接生成大纲，信息足够时**不调用 `read`**（3 次调用即可完成）；
+  - `thesis_outline_save` 自带校验，prompt 不再强制单独调用 `thesis_outline_validate`（少一次调用）；
+  - GUI 在「任务失败但结果文件已落盘」时自动载入并提示「任务实际已完成」；
+  - 仍频繁 429 时改用「传统流程（兼容）」：`generate_outline.py` / `polish.py` 每个任务只有 1 次 chat 调用，并支持 `--model`（GUI 传当前模型）；
+  - 或在 Moonshot 控制台充值/申请提高组织 RPM 配额。
+- 429 的错误文案会附带原始错误片段（含 RPM 数字时给出专门提示），并提示查额度/等待/换模型/传统流程兜底。
+- 降低 token 消耗：`thesis_pdf_ingest` 的 `preview=3000` 字符、`tail_preview=1500` 字符，覆盖题目/摘要与结论/参考文献；`grep` 只作可选优化，不可用时不影响主流程。
 
 ## 4.3 grep/find 依赖（rg/fd）
 
@@ -91,7 +98,7 @@ pi 的 `grep`/`find` 工具依赖 ripgrep（rg）与 fd：优先使用 `<PI_CODI
 
 - JSON 模式：首行 `{"type":"session",...}`，随后 `agent_start/turn_start/message_start/message_update/tool_execution_*/turn_end/agent_end/agent_settled`；`message_update.assistantMessageEvent` 为 delta-only（`text_delta` 带 `contentIndex`）。
 - 最终答案：取 `agent_end.messages` 中最后一条 `role=="assistant"` 的 text（`PiRuntime.last_assistant_text`）。
-- LLM/API 失败时进程退出码仍可能为 0：必须解析 `message_end.stopReason=="error"` 与 `auto_retry_*` 事件；provider/密钥类启动错误则是 `rc=1 + stderr` 文本。
+- LLM/API 失败时进程退出码仍可能为 0：必须解析 `message_end.stopReason=="error"` 与 `auto_retry_*` 事件；provider/密钥类启动错误则是 `rc=1 + stderr` 文本。**注意重试成功会覆盖此前错误**：只有在最终 `agent_settled` 时仍存在未清除的错误，`done.ok` 才应为 False。
 - RPC 模式下命令带 `id`，`response` 回带相同 `id`；事件与 response 会交错，客户端必须逐行分发、不能「等到事件结束再读 response」。
 
 ## 6. Windows 注意事项（已在 0.85.1 实测）

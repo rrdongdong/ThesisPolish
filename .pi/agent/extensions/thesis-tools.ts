@@ -535,12 +535,14 @@ export default function thesisToolsExtension(pi: ExtensionAPI): void {
     label: "Thesis PDF Ingest",
     description:
       "把论文 PDF 上传到 Moonshot Files API（purpose=file-extract），导出完整正文到 .thesis/pdf_text.txt，" +
-      "并返回 JSON 摘要（ok/text_path/chars/lines/headings/preview/error）。" +
-      "需要读论文正文时必须先调用本工具，再用 read 读取 .thesis/pdf_text.txt（不要直接读 PDF）。",
+      "并返回 JSON 摘要（ok/text_path/chars/lines/headings/preview/tail_preview/error）。" +
+      "preview 含题目/摘要开头、headings 含章节标题、tail_preview 含结论/参考文献附近内容；" +
+      "若这三者已足够填写大纲，可不再调用 read（低 RPM 账号尤其重要）。" +
+      "需要完整正文时再用 read 读取 .thesis/pdf_text.txt（不要直接读 PDF）。",
     promptSnippet:
       "thesis_pdf_ingest: 上传论文 PDF 并导出正文到 .thesis/pdf_text.txt（返回 JSON 摘要）",
     promptGuidelines: [
-      "需要根据 PDF 生成大纲时，先调用 thesis_pdf_ingest，再用 read 工具读取 .thesis/pdf_text.txt；不要凭 PDF 文件名猜测内容。",
+      "需要根据 PDF 生成大纲时，先调用 thesis_pdf_ingest；优先用返回的 preview/headings/tail_preview 生成大纲，信息不足时再用 read 读取 .thesis/pdf_text.txt；不要凭 PDF 文件名猜测内容。",
     ],
     parameters: Type.Object({
       path: Type.String({ description: "PDF 路径：绝对路径，或相对项目根目录的路径" }),

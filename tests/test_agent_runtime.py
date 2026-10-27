@@ -1135,3 +1135,42 @@ def test_live_run_once_json(workdir, monkeypatch, mock_factory):
         assert text == "一次性 JSON 模式返回成功。"
     finally:
         runtime.stop()
+
+
+# --------------------------------------------------------------------------
+# 8. 429 重试成功后不应误报失败（真实日志场景：第 1~2 次 429，重试成功后 done 仍应为 ok）
+# --------------------------------------------------------------------------
+def test_retry_success_clears_previous_error():
+    runtime = ar.PiRuntime()
+    runtime._prompt_active = True
+    runtime._handle_message_end(
+        {
+            "message": {
+                "role": "assistant",
+                "content": [],
+                "stopReason": "error",
+                "errorMessage": "429: rate limit exceeded",
+                "usage": {},
+            }
+        }
+    )
+    assert runtime._last_error, "首次 429 应记录错误"
+
+    retry_events = runtime._handle_event({"type": "auto_retry_end", "success": True})
+    assert any("自动重试成功" in event.text for event in retry_events)
+
+    # 重试成功后的正常 assistant 消息
+    runtime._handle_message_end(
+        {
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "任务完成"}],
+                "stopReason": "stop",
+                "usage": {},
+            }
+        }
+    )
+    events = runtime._handle_agent_settled()
+    done = [event for event in events if event.kind == "done"][-1]
+    assert done.data["ok"] is True, done.data
+    assert done.data["error"] is None, done.data

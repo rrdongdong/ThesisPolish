@@ -55,7 +55,8 @@ HELPER_VERSION = "1.0"
 DEFAULT_BASE_URL = "https://api.moonshot.cn/v1"
 DEFAULT_OUT_DIR = ".thesis"
 DEFAULT_TIMEOUT = 180.0
-PREVIEW_CHARS = 1200
+PREVIEW_CHARS = 3000
+TAIL_PREVIEW_CHARS = 1500
 MAX_HEADINGS = 500
 MAX_ERROR_BODY = 300
 
@@ -124,11 +125,18 @@ def _error_body(response: Any) -> str:
 # ---------------------------------------------------------------------------
 # 标题检测：摘要 / Abstract / 第X章 / 1.2.3 / 参考文献
 # ---------------------------------------------------------------------------
-_NUMBERED_HEADING = re.compile(r"^(\d+(?:\.\d+)+)\s*[、.．:：\s]?\s*(\S.*)$")
+_MARKDOWN_PREFIX = re.compile(r"^#{1,6}\s*")
+_NUMBERED_HEADING = re.compile(r"^(\d+(?:\.\d+)*)[.、．:：]?\s*(\S.*)$")
 _CHAPTER_HEADING = re.compile(r"^(第[一二三四五六七八九十百零两0-9]+章)\s*[:：.、]?\s*(.*)$")
 _ABSTRACT_CN = re.compile(r"^(摘\s*要)\s*[:：]?\s*(.*)$")
 _ABSTRACT_EN = re.compile(r"^(abstract)\b\s*[:：.]?\s*(.*)$", re.IGNORECASE)
 _REFERENCES = re.compile(r"^(参考文献|references|bibliography)\b\s*[:：]?\s*(.*)$", re.IGNORECASE)
+_EN_SECTION = re.compile(
+    r"^(introduction|related works?|background|preliminar(?:y|ies)|methodology|methods?|"
+    r"approach|experiments?|evaluation|results?|discussion|conclusions?|"
+    r"acknowledge?ments?)\b\s*[:：.]?\s*(.*)$",
+    re.IGNORECASE,
+)
 
 
 def _trim_title(text: str, limit: int = 80) -> str:
@@ -139,18 +147,23 @@ def _trim_title(text: str, limit: int = 80) -> str:
 def detect_headings(text: str) -> list[dict[str, Any]]:
     """按行扫描正文，返回 [{level,title,line}]（line 从 1 开始）。
 
-    识别规则（与 CLAUDE/项目约定一致）：
-      * 摘要 / Abstract            -> level 1
-      * 第X章（第一章、第 3 章…）  -> level 1
-      * 参考文献 / References      -> level 1
-      * 1.2.3 多级编号小标题        -> level = 编号段数
+    识别规则：
+      * 摘要 / Abstract / 参考文献 / References            -> level 1
+      * 第X章（第一章、第 3 章…）                          -> level 1
+      * Introduction / Related Work / Method 等英文章节名  -> level 1
+      * 1.2.3 多级编号小标题                                -> level = 编号段数
+      * Markdown 标题行（如 ``# 1.Introduction``）先去掉 ``#`` 前缀再判断
     """
     headings: list[dict[str, Any]] = []
     if not text:
         return headings
     for index, raw_line in enumerate(text.splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or len(line) > 120:
+        stripped = raw_line.strip()
+        if not stripped or len(stripped) > 120:
+            continue
+        has_markdown = bool(_MARKDOWN_PREFIX.match(stripped))
+        line = _MARKDOWN_PREFIX.sub("", stripped).strip()
+        if not line:
             continue
 
         match = _ABSTRACT_CN.match(line)
@@ -170,8 +183,12 @@ def detect_headings(text: str) -> list[dict[str, Any]]:
             title = f"{match.group(1)} {_trim_title(match.group(2))}".strip()
             headings.append({"level": 1, "title": _trim_title(title), "line": index})
             continue
+        match = _EN_SECTION.match(line)
+        if match and (has_markdown or len(line) <= 40):
+            headings.append({"level": 1, "title": match.group(1), "line": index})
+            continue
         match = _NUMBERED_HEADING.match(line)
-        if match:
+        if match and (has_markdown or "." in match.group(1)):
             number, title = match.group(1), _trim_title(match.group(2))
             if not title:
                 continue
@@ -394,6 +411,7 @@ def ingest(pdf: str, out: str = DEFAULT_OUT_DIR, force: bool = False) -> dict[st
         "lines": _count_lines(text),
         "headings": headings,
         "preview": text[:PREVIEW_CHARS],
+        "tail_preview": text[-TAIL_PREVIEW_CHARS:] if text else "",
         "error": None,
         "cached": cached,
         "sha1": sha1,
@@ -410,6 +428,7 @@ def _failure(error: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         "lines": 0,
         "headings": [],
         "preview": "",
+        "tail_preview": "",
         "error": error,
     }
     if extra:

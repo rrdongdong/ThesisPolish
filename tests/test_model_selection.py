@@ -389,3 +389,34 @@ def test_runtime_provisions_aux_bins(monkeypatch):
     bin_dir = agent_dir / "bin"
     assert (bin_dir / f"rg{exe}").read_bytes() == b"fake-rg"
     assert (bin_dir / f"fd{exe}").read_bytes() == b"fake-fd"
+
+
+def test_humanize_429_reports_org_rpm_limit():
+    message = agent_runtime.humanize_pi_error(
+        '429: {"message":"Your account org-c04770fae26844b6bc55c66ba8de6301 request '
+        'reached organization max RPM: 3, please try again later"}'
+    )
+    assert "3 RPM" in message
+    assert "传统流程" in message
+
+
+def test_gui_recovers_saved_outline_when_final_step_failed(gui_app):
+    """agent 已保存 outline.txt，但最后汇报调用 429 失败：GUI 应载入文件并提示实际完成。"""
+    app, _root = gui_app
+    work = _workdir()
+    outline_path = work / "outline.txt"
+    app.outline_path_var.set(str(outline_path))
+    app._pending_action = "outline"
+    app._action_started_at = time.time() - 5
+    outline_path.write_text(
+        "题目：REALM\n摘要：未提供\n第一章题目：Introduction\n第二章题目：Related Works\n"
+        "第三章题目：Methodology\n第四章题目：Experiments\n第五章题目：Conclusion\n"
+        "总结：未提供\n参考文献：有\n",
+        encoding="utf-8",
+    )
+    app._handle_agent_done(
+        {"ok": False, "error": "429: resource_exhausted quota", "usage": {}, "text": ""}
+    )
+    log = app._get_text_content(app.agent_log_text)
+    assert "任务实际已完成" in log
+    assert "题目：REALM" in app._get_text_content(app.outline_text)
