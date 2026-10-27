@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import gc
 import json
 import os
 import socket
@@ -213,10 +214,16 @@ def tk_root():
     try:
         yield root
     finally:
+        # 关键顺序：先清控件并 gc（此时 Tk 仍存活），再销毁根窗口，
+        # 避免 StringVar/IntVar 的 __del__ 在后续测试的 GC 中访问已销毁的 Tk
+        # （否则会触发不可捕获警告 "main thread is not in main loop"）。
+        _clear_root(root)
+        gc.collect()
         try:
             root.destroy()
         except tk.TclError:
             pass
+        gc.collect()
 
 
 def _clear_root(root) -> None:
@@ -493,3 +500,45 @@ def test_gui_quota_cooldown_auto_starts_after_wait(gui_app):
 
     assert _pump(root, lambda: bool(asked), timeout=5), "冷却结束后未自动开始"
     assert len(asked) == 1
+
+
+def test_gui_doctor_button_runs_diagnostic(gui_app, monkeypatch):
+    """GUI「诊断限流」按钮应调用 tools/moonshot_doctor.py 并把输出写入状态日志。"""
+    app, root = gui_app
+    import GUI as GUI_MODULE
+
+    assert app.btn_doctor.cget("text") == "诊断限流"
+    app.api_key_var.set("sk-fake")
+
+    class _FakeProc:
+        stdout = "诊断输出：模型列表 OK"
+        stderr = ""
+        returncode = 0
+
+    def fake_run(cmd, **kwargs):
+        assert any("moonshot_doctor.py" in str(part) for part in cmd)
+        return _FakeProc()
+
+    monkeypatch.setattr(GUI_MODULE.subprocess, "run", fake_run)
+    app.run_doctor()
+    assert _pump(root, lambda: not app._doctor_running), "诊断未完成"
+    root.update()
+    log = app._get_text_content(app.agent_log_text)
+    assert "诊断输出：模型列表 OK" in log
+    assert "诊断结束" in log
+
+
+def test_gui_prints_full_raw_error_detail(gui_app):
+    """429 时状态日志应额外打印完整原始错误，便于排查 RPM/项目配额。"""
+    app, _root = gui_app
+    import types
+
+    event = types.SimpleNamespace(
+        kind="status",
+        text="模型调用出错：429",
+        data={"phase": "model_error", "raw_error": "429: organization max RPM 100 exceeded detail XYZ"},
+    )
+    app._handle_agent_event(event)
+    log = app._get_text_content(app.agent_log_text)
+    assert "原始错误（完整）" in log
+    assert "detail XYZ" in log

@@ -88,6 +88,7 @@ pi 内置模型目录（`pi --list-models kimi`）列出的是 pi 已知的模�
   - GUI 在「任务失败但结果文件已落盘」时自动载入并提示「任务实际已完成」；`停止` 15 秒未确认会强制 `stop()` pi 进程，避免后台重试风暴；
   - 仍频繁 429 时改用「传统流程（兼容）」：`generate_outline.py` / `polish.py` 每个任务只有 1 次 chat 调用（PDF 正文走 Files API + sha1 缓存，不计入 chat RPM），并支持 `--model`（GUI 传当前模型）。这两个脚本**不再依赖 openai SDK**，改用 `tools/moonshot_chat.py`（requests 直连）——openai 3.x（依赖 httpx2）在部分 Windows/Python 环境会报 `TypeError: process() takes no keyword arguments`，绕开可稳定运行；
   - 或在 Moonshot 控制台充值/申请提高组织 RPM 配额。
+  - **升级 RPM 后仍 429 的排查**：① 旧 GUI 进程不会自动热更新代码，必须重启（徽标含 `v2.4` 才是新代码），并等 60 秒清空窗口；② GUI 顶部「诊断限流」运行 `tools/moonshot_doctor.py`，输出可用模型、余额、最小 chat 的 HTTP 状态/完整 429 原文/限流响应头；③ 限流可能分层：组织（org-…）/项目（proj-…）/单模型，组织 RPM 升级不等于项目 RPM 生效，需在控制台确认项目配额；④ 用诊断脚本逐个模型测试，排除单模型限制；⑤ 实时确认余额（¥ 余额足够不代表 RPM 生效）。
 - 429 的错误文案会附带原始错误片段（含 RPM 数字时给出专门提示），并提示查额度/等待/换模型/传统流程兜底。
 - 降低 token 消耗：`thesis_pdf_ingest` 的 `preview=3000` 字符、`tail_preview=1500` 字符，覆盖题目/摘要与结论/参考文献；`grep` 只作可选优化，不可用时不影响主流程。
 

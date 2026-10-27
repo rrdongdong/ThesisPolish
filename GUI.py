@@ -48,7 +48,7 @@ except Exception as exc:  # noqa: BLE001 - 缺少依赖/文件时也要让 GUI �
 POLL_INTERVAL_MS = 80
 MAX_EVENTS_PER_POLL = 400
 WINDOW_TITLE = "论文大纲提取与段落润色"
-PI_BADGE = "pi 0.85.1 · Kimi · v2.3(2026-10-27)"
+PI_BADGE = "pi 0.85.1 · Kimi · v2.4(2026-10-27)"
 
 # pi 不可用 / 启动失败时的中文排查指引
 AGENT_GUIDANCE = (
@@ -87,6 +87,8 @@ class ThesisGUI:
         self._last_quota_error_at: float | None = None  # 上次 429 时间（用于冷却提示）
         self._cooldown_job: str | None = None  # 冷却等待的 after 任务 id
         self._cooldown_waiting = False  # 是否正在等待冷却后自动开始
+        self._doctor_running = False  # 是否正在运行限流诊断
+        self._last_raw_error_logged = ""  # 避免重复打印同一条原始错误
         self._banner_wrap = 0
 
         # --- 两个标签页共享的 StringVars（顶部公共区） ---
@@ -204,6 +206,8 @@ class ThesisGUI:
         self.btn_refresh_models.grid(row=5, column=3, sticky="we", padx=(8, 0), pady=2)
         self.btn_balance = ttk.Button(header, text="查询额度", command=self.check_balance)
         self.btn_balance.grid(row=5, column=4, sticky="we", padx=(6, 0), pady=2)
+        self.btn_doctor = ttk.Button(header, text="诊断限流", command=self.run_doctor)
+        self.btn_doctor.grid(row=5, column=5, sticky="we", padx=(6, 0), pady=2)
 
     # ------------------------------------------------------------------
     # Agent 助手标签页
@@ -843,6 +847,75 @@ class ThesisGUI:
             f"⚠️ 查询额度失败：{self._shorten(str(exc), 300)}", tag="error"
         )
 
+    def _set_doctor_button_state(self, state: str) -> None:
+        try:
+            self.btn_doctor.configure(state=state)
+        except (AttributeError, tk.TclError):
+            pass
+
+    def run_doctor(self) -> None:
+        """运行限流诊断：可用模型列表 / 账户额度 / 最小 chat 请求（排查 429）。"""
+        if self._doctor_running:
+            return
+        api_key = self.api_key_var.get().strip()
+        if not api_key:
+            self._warn("缺少参数", "请先在顶部输入 kimi API 密钥，再运行诊断。")
+            return
+        script = self.base_dir / "tools" / "moonshot_doctor.py"
+        if not script.exists():
+            self._show_error("文件缺失", f"未找到诊断脚本：{script}")
+            return
+        self._doctor_running = True
+        self._set_doctor_button_state("disabled")
+        self.append_agent_log("=" * 60, tag="muted")
+        self.append_agent_log(
+            "🩺 正在运行限流诊断（模型列表 / 账户额度 / 最小 chat 测试）…", tag="muted"
+        )
+        env = os.environ.copy()
+        env["MOONSHOT_API_KEY"] = api_key
+        env["PYTHONIOENCODING"] = "utf-8"
+        model = self._current_model()
+        cmd = [sys.executable, str(script)]
+        if model:
+            cmd += ["--model", model]
+
+        def worker() -> None:
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=str(self.base_dir),
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=180,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+                self._call_ui(self._on_doctor_done, output, proc.returncode, None)
+            except Exception as exc:  # noqa: BLE001
+                self._call_ui(self._on_doctor_done, "", -1, f"{type(exc).__name__}: {exc}")
+
+        threading.Thread(target=worker, name="thesis-doctor", daemon=True).start()
+
+    def _on_doctor_done(self, output, returncode, error=None) -> None:
+        self._doctor_running = False
+        self._set_doctor_button_state("disabled" if self._agent_busy else "normal")
+        if error:
+            self.append_agent_log(f"⚠️ 诊断失败：{error}", tag="error")
+            return
+        lines = [line for line in str(output or "").splitlines() if line.strip()]
+        for line in lines[:80]:
+            self.append_agent_log(line, tag="muted")
+        if len(lines) > 80:
+            self.append_agent_log(f"…（输出过长，已截断，共 {len(lines)} 行）", tag="muted")
+        tag = "ok" if returncode == 0 else "error"
+        self.append_agent_log(
+            f"🩺 诊断结束（exit={returncode}）。若仍有 429，请把以上输出发给维护者。",
+            tag=tag,
+        )
+
     @staticmethod
     def _pick_preferred_model(models: list[str]) -> str:
         """在可用列表里挑一个较新的 Kimi 模型；找不到则取第一个。"""
@@ -1124,6 +1197,14 @@ class ThesisGUI:
             message = self._event_short_text(data, text, ("text", "message", "status", "phase"))
             if message:
                 self.append_agent_log(f"ℹ️ {message}", tag="muted")
+            raw_error = data.get("raw_error")
+            if raw_error:
+                raw_text = str(raw_error)
+                if raw_text != self._last_raw_error_logged:
+                    self._last_raw_error_logged = raw_text
+                    self.append_agent_log(
+                        f"   原始错误（完整）：{self._shorten(raw_text, 700)}", tag="muted"
+                    )
         elif kind == "error":
             error = self._event_short_text(data, text, ("text", "message", "error")) or "未知错误"
             self._last_agent_error = error
@@ -1323,6 +1404,9 @@ class ThesisGUI:
         self._set_balance_button_state(
             "disabled" if (busy or self._balance_loading) else "normal"
         )
+        self._set_doctor_button_state(
+            "disabled" if (busy or self._doctor_running) else "normal"
+        )
 
     def _begin_agent_action(
         self,
@@ -1363,6 +1447,7 @@ class ThesisGUI:
 
         self._pending_action = kind
         self._action_started_at = time.time()
+        self._last_raw_error_logged = ""
         self._stream_buffer = ""
         self._last_agent_error = ""
         self._tool_update_seen = {}

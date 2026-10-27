@@ -192,3 +192,20 @@ def test_polish_main_writes_output(mock_api, monkeypatch):
     )
     assert code == 0
     assert (project / "polished.txt").read_text(encoding="utf-8") == "这是润色后的文本。"
+
+
+def test_moonshot_doctor_reports_checks(mock_api, monkeypatch, capsys):
+    """诊断脚本：模型列表 / 额度 / 最小 chat 均应输出结果。"""
+    base_url, _port, _work = mock_api(
+        {"MOCK_MODELS": "kimi-k2.5,kimi-k2.6", "MOCK_FINAL_TEXT": "pong"}
+    )
+    _set_env(monkeypatch, base_url)
+    import moonshot_doctor
+
+    code = moonshot_doctor.main(["--model", "kimi-k2.5", "--timeout", "5"])
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "kimi-k2.5" in output
+    assert "账户额度" in output
+    assert "HTTP 200" in output
+    assert "chat 调用成功" in output
