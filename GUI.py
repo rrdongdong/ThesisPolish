@@ -48,7 +48,7 @@ except Exception as exc:  # noqa: BLE001 - 缺少依赖/文件时也要让 GUI �
 POLL_INTERVAL_MS = 80
 MAX_EVENTS_PER_POLL = 400
 WINDOW_TITLE = "论文大纲提取与段落润色"
-PI_BADGE = "pi 0.85.1 · Kimi · v2.4(2026-10-27)"
+PI_BADGE = "pi 0.85.1 · Kimi · v2.5(2026-10-27)"
 
 # pi 不可用 / 启动失败时的中文排查指引
 AGENT_GUIDANCE = (

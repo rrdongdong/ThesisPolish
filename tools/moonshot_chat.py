@@ -29,6 +29,15 @@ DEFAULT_BASE_URL = "https://api.moonshot.cn/v1"
 DEFAULT_MODEL = "kimi-k2-0905-preview"
 RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 RETRYABLE_LIMIT = 6
+#: Kimi K2.5+/K3 系列只允许 temperature=1（传其它值会 400 invalid temperature），
+#: 因此对这些模型不发送 temperature 字段，使用服务端默认值。
+FIXED_TEMPERATURE_PREFIXES = ("kimi-k2.5", "kimi-k2.6", "kimi-k2.7", "kimi-k3")
+
+
+def requires_default_temperature(model: str) -> bool:
+    """该模型是否必须使用固定 temperature（1），不能传自定义值。"""
+    low = (model or "").strip().lower()
+    return any(low.startswith(prefix) for prefix in FIXED_TEMPERATURE_PREFIXES)
 
 
 class MoonshotChatError(RuntimeError):
@@ -80,9 +89,11 @@ def chat_completion(
     payload = {
         "model": (model or "").strip() or default_model(),
         "messages": messages,
-        "temperature": temperature,
         "stream": False,
     }
+    if not requires_default_temperature(payload["model"]):
+        payload["temperature"] = temperature
+    temperature_retried = False
     delay = max(float(retry_base), 0.01)
     last_error = ""
     for attempt in range(1, max(1, int(max_attempts)) + 1):
@@ -95,6 +106,13 @@ def chat_completion(
             time.sleep(delay)
             delay = min(delay * 2, 60.0)
             continue
+
+        if response.status_code == 400 and "temperature" in payload and not temperature_retried:
+            # 部分 Kimi 模型只允许 temperature=1：去掉该字段重试一次，而不是直接失败。
+            if "temperature" in response.text.lower():
+                payload.pop("temperature", None)
+                temperature_retried = True
+                continue
 
         if response.status_code in RETRYABLE_STATUS:
             last_error = f"HTTP {response.status_code}: {response.text[:300]}"

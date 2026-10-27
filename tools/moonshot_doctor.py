@@ -119,8 +119,7 @@ def check_chat(base: str, key: str, model: str, timeout: float) -> bool:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
-        "temperature": 0,
+        "max_tokens": 16,
         "stream": False,
     }
     started = time.time()
@@ -182,17 +181,35 @@ def main(argv: list[str] | None = None) -> int:
     available = check_models(base, key, args.timeout)
     check_balance(base, key, args.timeout)
 
-    ok = True
+    good: list[str] = []
+    tried: list[str] = []
     for model in models_to_test:
-        ok = check_chat(base, key, model, args.timeout) and ok
+        tried.append(model)
+        if check_chat(base, key, model, args.timeout):
+            good.append(model)
+
+    # 当前模型失败时，自动测试其它可用模型，直接给出可替代方案
+    if not good and available:
+        extras = [model for model in available if model not in tried][:3]
+        if extras:
+            print("\n[补充] 待测模型不可用，自动测试其它可用模型：")
+        for model in extras:
+            tried.append(model)
+            if check_chat(base, key, model, args.timeout):
+                good.append(model)
 
     print("\n" + "=" * 72)
-    if ok:
-        print("结论：当前 Key 与待测模型可用。若 GUI 仍 429：请完全关闭并重启 GUI（新版本徽标 v2.4），再等 60 秒后重试。")
+    if good:
+        recommended = good[0]
+        print(f"结论：chat 调用可用（可用模型：{'、'.join(good)}）。")
+        if recommended not in models_to_test:
+            print(f"建议：把 GUI「Agent 模型」改为「{recommended}」后重试。")
+        else:
+            print("若 GUI 仍 429：完全关闭旧 GUI 进程并重启，等 60 秒后重试。")
     else:
-        print("结论：存在失败项，请按上面每项的输出处理；把本输出发给维护者可继续定位。")
+        print("结论：所有待测模型 chat 均失败，请按上面错误原文处理；把本输出发给维护者可继续定位。")
     print("=" * 72)
-    return 0 if ok else 1
+    return 0 if good else 1
 
 
 if __name__ == "__main__":

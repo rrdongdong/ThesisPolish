@@ -209,3 +209,62 @@ def test_moonshot_doctor_reports_checks(mock_api, monkeypatch, capsys):
     assert "账户额度" in output
     assert "HTTP 200" in output
     assert "chat 调用成功" in output
+
+
+def test_chat_omits_temperature_for_fixed_models(monkeypatch):
+    """Kimi K2.5+/K3 只允许 temperature=1：客户端应主动省略 temperature 字段。"""
+    captured: list[dict] = []
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002 - 对齐 requests 签名
+        captured.append(dict(json or {}))
+        return _Resp()
+
+    monkeypatch.setenv("MOONSHOT_API_KEY", "sk-x")
+    monkeypatch.setattr(moonshot_chat.requests, "post", fake_post)
+
+    assert moonshot_chat.chat_completion(
+        "kimi-k2.6", [{"role": "user", "content": "hi"}], retry_base=0.01
+    ) == "ok"
+    assert "temperature" not in captured[0]
+
+    assert moonshot_chat.chat_completion(
+        "moonshot-v1-8k", [{"role": "user", "content": "hi"}], temperature=0.3, retry_base=0.01
+    ) == "ok"
+    assert captured[1]["temperature"] == 0.3
+
+
+def test_chat_retries_without_temperature_on_400(monkeypatch):
+    """若服务端返回 400 invalid temperature，应去掉 temperature 重试一次。"""
+    calls: list[dict] = []
+
+    class _Resp400:
+        status_code = 400
+        text = '{"error":{"message":"invalid temperature: only 1 is allowed for this model"}}'
+
+    class _Resp200:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"choices": [{"message": {"content": "retry-ok"}}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):  # noqa: A002
+        calls.append(dict(json or {}))
+        return _Resp400() if len(calls) == 1 else _Resp200()
+
+    monkeypatch.setenv("MOONSHOT_API_KEY", "sk-x")
+    monkeypatch.setattr(moonshot_chat.requests, "post", fake_post)
+
+    text = moonshot_chat.chat_completion(
+        "moonshot-v1-8k", [{"role": "user", "content": "hi"}], retry_base=0.01
+    )
+    assert text == "retry-ok"
+    assert "temperature" in calls[0]
+    assert "temperature" not in calls[1]
