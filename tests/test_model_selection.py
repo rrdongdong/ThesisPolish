@@ -710,3 +710,36 @@ def test_gui_sidebar_width_is_draggable_and_persisted(gui_app):
         app.body_paned.sashpos(0, 356)
     finally:
         root.withdraw()
+
+
+def test_gui_theme_switch_leaves_no_stale_backgrounds(gui_app):
+    """运行时切换主题后，不能残留上一主题的深色/浅色背景块。"""
+    import ui_theme
+
+    app, root = gui_app
+
+    def stale_colors(palette_values):
+        values = {v.lower() for v in palette_values}
+        found = []
+
+        def walk(widget):
+            for child in widget.winfo_children():
+                if not child.winfo_class().startswith("T"):
+                    try:
+                        bg = str(child.cget("bg")).lower()
+                    except tk.TclError:
+                        bg = ""
+                    if bg in values:
+                        found.append((child.winfo_class(), bg))
+                walk(child)
+
+        walk(root)
+        return found
+
+    app._apply_theme("light", save=False)
+    root.update_idletasks()
+    assert stale_colors(ui_theme.PALETTES["dark"].values()) == []
+
+    app._apply_theme("dark", save=False)
+    root.update_idletasks()
+    assert stale_colors(ui_theme.PALETTES["light"].values()) == []

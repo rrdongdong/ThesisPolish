@@ -670,3 +670,70 @@ def apply_theme(root: tk.Misc, theme: Theme) -> None:
         root.configure(bg=theme.palette["bg"])
     except tk.TclError:
         pass
+
+
+# 可能保存调色板颜色的常见 tk 控件选项（ttk 控件由样式负责，不在此列）
+_WIDGET_COLOR_OPTIONS = (
+    "bg",
+    "fg",
+    "activebackground",
+    "activeforeground",
+    "disabledforeground",
+    "highlightbackground",
+    "highlightcolor",
+    "insertbackground",
+    "selectbackground",
+    "selectforeground",
+    "troughcolor",
+    "readonlybackground",
+    "inactiveselectbackground",
+)
+
+
+def remap_tk_colors(root: tk.Misc, old_palette: dict[str, str], new_palette: dict[str, str]) -> None:
+    """兜底换肤：把未注册主题的普通 tk 控件上的旧调色板颜色映射为新主题颜色。
+
+    GUI 中有一些轻量容器（tk.Frame / tk.Label / tk.Canvas）是临时创建的，
+    不一定都注册到 Theme；切换主题时若不重映射，会残留上一主题的深色背景
+    （表现为浅色模式下出现若干黑色块）。这里按“旧调色板值 → 新调色板值”
+    递归替换，避免逐个控件登记。
+    """
+    mapping: dict[str, list[str]] = {}
+    for key, old_value in old_palette.items():
+        new_value = new_palette.get(key)
+        if not old_value or not new_value:
+            continue
+        if old_value.lower() != new_value.lower():
+            mapping.setdefault(old_value.lower(), []).append(key)
+    if not mapping:
+        return
+
+    def walk(widget: tk.Misc) -> None:
+        try:
+            children = widget.winfo_children()
+        except tk.TclError:
+            return
+        for child in children:
+            try:
+                is_ttk = child.winfo_class().startswith("T")
+            except tk.TclError:
+                continue
+            if not is_ttk:
+                for option in _WIDGET_COLOR_OPTIONS:
+                    try:
+                        current = child.cget(option)
+                    except tk.TclError:
+                        continue
+                    if not isinstance(current, str) or not current:
+                        continue
+                    keys = mapping.get(current.lower())
+                    if not keys:
+                        continue
+                    try:
+                        child.configure(**{option: new_palette[keys[0]]})
+                    except tk.TclError:
+                        pass
+            walk(child)
+
+    walk(root)
+

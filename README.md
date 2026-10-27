@@ -2,7 +2,7 @@
 
 > 面向硕士毕业论文的 **大纲提取 + 局部保义润色** 桌面工具，由本地 [pi](https://github.com/earendil-works/pi) Agent 驱动；生成过程实时显示在 GUI 中。
 
-![版本](https://img.shields.io/badge/version-v3.1_(2026--10--27)-blue)
+![版本](https://img.shields.io/badge/version-v3.2_(2026--10--27)-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Python](https://img.shields.io/badge/python-3.10%2B-yellow)
 ![Node](https://img.shields.io/badge/node-%E2%89%A522.19-brightgreen)
@@ -51,7 +51,7 @@ v2 起引入 [pi](https://github.com/earendil-works/pi) agent 框架：润色/�
 - **长文本安全**：prompt 走 RPC JSON 行 / stdin，绝不放进 Windows 命令行（约 32K 字符上限）。
 - **可取消、可多轮**：`停止` 发送 abort（15s 未确认强制结束进程）；`新对话` 新建 pi 会话。
 - **双轨兼容**：传统流程只依赖 `requests`（不再依赖 openai SDK），每个任务仅 1 次模型调用，低 RPM 账号首选。
-- **离线可验收**：内置 OpenAI / Moonshot Files API / 余额接口 mock 服务，120 个 pytest 用例，无需真实 API Key 即可跑通完整链路。
+- **离线可验收**：内置 OpenAI / Moonshot Files API / 余额接口 mock 服务，121 个 pytest 用例，无需真实 API Key 即可跑通完整链路。
 
 ## 界面
 
@@ -239,7 +239,7 @@ ThesisPolish/
 ## 测试
 
 ```powershell
-python -m pytest tests -q        # 当前：120 passed（离线，无需真实 API Key）
+python -m pytest tests -q        # 当前：121 passed（离线，无需真实 API Key）
 ```
 
 - `tests/mock_openai_server.py`：模拟 OpenAI Chat Completions（SSE + 可脚本化工具调用）、Moonshot Files API、账户余额接口；
@@ -278,6 +278,7 @@ python -m pytest tests -q        # 当前：120 passed（离线，无需真实 A
 | v2.6 | 2026-10-27 | 大纲实时预览、章节/小标题结构面板、层级大纲（9 字段 + 每章下一级小标题）、文件实时监听 |
 | v3.0 | 2026-10-27 | **现代 UI 重构**：`ui_theme.py` 设计体系、侧边栏 + 卡片布局、自定义导航、深/浅色主题切换、状态胶囊、高 DPI；新增「大纲实时预览」卡片与主题持久化 |
 | v3.1 | 2026-10-27 | 品牌栏副标题改为自然高度（修复高 DPI 下被裁切）；左侧边栏改为可拖拽分隔条并记忆宽度 |
+| v3.2 | 2026-10-27 | 修复运行时切换浅色主题残留黑色块：未注册的普通 tk 容器（Frame/Label）按旧→新调色板重映射颜色 |
 
 ## 贡献与提交约定
 

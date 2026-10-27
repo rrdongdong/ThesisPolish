@@ -51,7 +51,7 @@ except Exception as exc:  # noqa: BLE001 - 缺少依赖/文件时也要让 GUI �
 POLL_INTERVAL_MS = 80
 MAX_EVENTS_PER_POLL = 400
 WINDOW_TITLE = "论文大纲提取与段落润色"
-PI_BADGE = "pi 0.85.1 · Kimi · v3.1(2026-10-27)"
+PI_BADGE = "pi 0.85.1 · Kimi · v3.2(2026-10-27)"
 
 # 状态日志标签配色（值 = (前景色 key, 背景色 key)）
 LOG_TAG_COLORS = {
@@ -430,6 +430,7 @@ class ThesisGUI:
         self._apply_theme("light" if self._theme_name == "dark" else "dark", save=True)
 
     def _apply_theme(self, name: str, *, save: bool = True, rebuild_styles: bool = True) -> None:
+        old_palette = dict(self.theme.palette)
         self._theme_name = name if name in ("dark", "light") else "dark"
         self.theme.set_name(self._theme_name)
         p = self.theme.palette
@@ -440,6 +441,9 @@ class ThesisGUI:
         if rebuild_styles:
             ui_theme.configure_ttk(ttk.Style(self.root), self.theme)
         self.theme.apply_all()
+        # 兜底：临时创建的普通 tk 容器（Frame/Label/Canvas）不在 Theme 注册表里，
+        # 这里按旧→新调色板映射颜色，避免浅色模式下残留深色块。
+        ui_theme.remap_tk_colors(self.root, old_palette, p)
         try:
             self.root.option_add("*TCombobox*Listbox.background", p["card"])
             self.root.option_add("*TCombobox*Listbox.foreground", p["text"])
